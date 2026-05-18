@@ -164,6 +164,7 @@ pub struct App {
     pub status: String,
     pub prefix_pending: bool,
     pub show_sidebar: bool,
+    pub needs_redraw: bool,
 }
 
 impl App {
@@ -179,6 +180,7 @@ impl App {
             status: "Ctrl+A then: n=new  l=load  ↓=next  ↑=prev  1-9=jump  r=rename  d=detach  z=sidebar  q=quit".to_string(),
             prefix_pending: false,
             show_sidebar: true,
+            needs_redraw: true,
         }
     }
 

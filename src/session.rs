@@ -79,6 +79,7 @@ pub struct Session {
     pub size: (u16, u16),
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
+    pub dirty: Arc<AtomicBool>,
     pub pid: Option<u32>,
     pub claude_status: String,
     pub claude_name: Option<String>,
@@ -131,11 +132,13 @@ impl Session {
         let writer = pair.master.take_writer().context("take writer")?;
         let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
         let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
 
         let reader_thread = {
             let parser = parser.clone();
             let alive = alive.clone();
+            let dirty_t = dirty.clone();
             let last_active = last_active_ms.clone();
             let mut reader = reader;
             thread::Builder::new()
@@ -150,6 +153,7 @@ impl Session {
                                     p.process(&buf[..n]);
                                 }
                                 last_active.store(now_ms(), Ordering::SeqCst);
+                                dirty_t.store(true, Ordering::Relaxed);
                             }
                             Err(_) => break,
                         }
@@ -169,6 +173,7 @@ impl Session {
             size: (rows, cols),
             alive,
             last_active_ms,
+            dirty,
             pid,
             claude_status: String::new(),
             claude_name: None,
@@ -257,6 +262,7 @@ impl Session {
         if let Ok(mut p) = self.parser.lock() {
             p.resize(rows, cols);
         }
+        self.dirty.store(true, Ordering::Relaxed);
         Ok(())
     }
 

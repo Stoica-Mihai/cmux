@@ -61,15 +61,28 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     }
     persist_now(&app);
 
-    let debug = std::env::var_os("CMUX_DEBUG").is_some();
+    let debug = util::debug_enabled();
     let mut tile_sizes: ui::TileSizes = Vec::new();
+    let mut last_draw_ms: u64 = 0;
+    const HEARTBEAT_MS: u64 = 250;
     loop {
         app.reap_dead();
-        terminal.draw(|f| ui::draw(f, &app, &mut tile_sizes))?;
-        for (idx, rows, cols) in tile_sizes.drain(..) {
-            if let Some(s) = app.sessions.get_mut(idx) {
-                let _ = s.resize(rows.max(2), cols.max(4));
+
+        let any_session_dirty = app
+            .sessions
+            .iter()
+            .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
+        let now = util::now_ms();
+        let elapsed = now.saturating_sub(last_draw_ms);
+        if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
+            terminal.draw(|f| ui::draw(f, &app, &mut tile_sizes))?;
+            for (idx, rows, cols) in tile_sizes.drain(..) {
+                if let Some(s) = app.sessions.get_mut(idx) {
+                    let _ = s.resize(rows.max(2), cols.max(4));
+                }
             }
+            app.needs_redraw = false;
+            last_draw_ms = now;
         }
 
         if event::poll(Duration::from_millis(40))? {
@@ -82,10 +95,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
                         continue;
                     }
                     handle_key(&mut app, key)?;
+                    app.needs_redraw = true;
                 }
                 Event::Resize(cols, rows) => {
                     app.term_size = (rows, cols);
                     resize_all(&mut app);
+                    app.needs_redraw = true;
                 }
                 _ => {}
             }
