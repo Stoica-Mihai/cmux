@@ -1,11 +1,63 @@
+use alacritty_terminal::Term;
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context, Result};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::term_render::{self, TermSize};
+
+const SCROLLBACK_LINES: usize = 4096;
+
+pub struct TerminalState {
+    pub term: Term<VoidListener>,
+    pub proc: Processor,
+}
+
+impl TerminalState {
+    fn new(rows: u16, cols: u16) -> Self {
+        let config = TermConfig {
+            scrolling_history: SCROLLBACK_LINES,
+            ..Default::default()
+        };
+        let size = TermSize {
+            lines: rows.max(1) as usize,
+            cols: cols.max(1) as usize,
+        };
+        let term = Term::new(config, &size, VoidListener);
+        Self {
+            term,
+            proc: Processor::new(),
+        }
+    }
+
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.proc.advance(&mut self.term, bytes);
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let size = TermSize {
+            lines: rows.max(1) as usize,
+            cols: cols.max(1) as usize,
+        };
+        self.term.resize(size);
+    }
+
+    pub fn scroll(&mut self, scroll: Scroll) {
+        self.term.scroll_display(scroll);
+    }
+
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+}
 
 pub struct Session {
     pub id: u64,
@@ -13,7 +65,7 @@ pub struct Session {
     pub cwd: PathBuf,
     pub dangerous: bool,
     pub resume_id: Option<String>,
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub parser: Arc<Mutex<TerminalState>>,
     pub size: (u16, u16),
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
@@ -44,7 +96,12 @@ impl Session {
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("openpty")?;
 
         let mut cmd = CommandBuilder::new("claude");
@@ -69,7 +126,7 @@ impl Session {
 
         let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair.master.take_writer().context("take writer")?;
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4096)));
+        let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -169,12 +226,12 @@ impl Session {
 
     fn detect_permission_prompt(&self) -> bool {
         let Ok(p) = self.parser.lock() else { return false };
-        let text = p.screen().contents();
-        if std::env::var_os("TMUX_CLAUDE_DEBUG").is_some() {
+        let text = term_render::visible_text(&p.term);
+        if std::env::var_os("CMUX_DEBUG").is_some() {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(format!("/tmp/tmux-claude-screen-{}.txt", self.id))
+                .open(format!("/tmp/cmux-screen-{}.txt", self.id))
             {
                 use std::io::Write;
                 let _ = writeln!(f, "\n========= scan at id={} =========\n{}\n", self.id, text);
@@ -211,10 +268,15 @@ impl Session {
         }
         self.size = (rows, cols);
         self.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("resize pty")?;
         if let Ok(mut p) = self.parser.lock() {
-            p.screen_mut().set_size(rows, cols);
+            p.resize(rows, cols);
         }
         Ok(())
     }

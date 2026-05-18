@@ -3,10 +3,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use tui_term::widget::PseudoTerminal;
 
 use crate::app::{App, Mode};
 use crate::session::Session;
+use crate::term_render::TermWidget;
 
 pub type TileSizes = Vec<(usize, u16, u16)>;
 
@@ -46,7 +46,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" tmux-claude — cheat sheet ")
+        .title(" cmux — cheat sheet ")
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
@@ -485,8 +485,7 @@ fn draw_tile(
     f.render_widget(block, area);
 
     if let Ok(parser) = session.parser.lock() {
-        let screen = parser.screen();
-        let widget = PseudoTerminal::new(screen);
+        let widget = TermWidget::new(&parser.term);
         f.render_widget(widget, inner);
     }
     inner
@@ -649,7 +648,7 @@ fn footer_for(app: &App) -> Line<'static> {
                 .sessions
                 .iter()
                 .find(|s| s.id == *id)
-                .and_then(|s| s.parser.lock().ok().map(|p| p.screen().scrollback()))
+                .and_then(|s| s.parser.lock().ok().map(|p| p.display_offset()))
                 .unwrap_or(0);
             (
                 " SCROLLBACK ",

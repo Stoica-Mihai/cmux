@@ -2,6 +2,7 @@ mod app;
 mod keys;
 mod persist;
 mod session;
+mod term_render;
 mod transcripts;
 mod ui;
 
@@ -58,7 +59,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     }
     persist_now(&app);
 
-    let debug = std::env::var_os("TMUX_CLAUDE_DEBUG").is_some();
+    let debug = std::env::var_os("CMUX_DEBUG").is_some();
     let mut tile_sizes: ui::TileSizes = Vec::new();
     loop {
         app.reap_dead();
@@ -100,7 +101,7 @@ fn log_key(key: &KeyEvent, prefix_pending: bool) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/tmux-claude-keys.log")
+        .open("/tmp/cmux-keys.log")
     {
         let _ = writeln!(
             f,
@@ -179,31 +180,28 @@ fn handle_reorder(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
+    use alacritty_terminal::grid::Scroll;
     let Some(s) = app.sessions.iter().find(|s| s.id == id) else {
         app.mode = Mode::Dashboard;
         return Ok(());
     };
-    let current = s.parser.lock().map(|p| p.screen().scrollback()).unwrap_or(0);
 
     let exit = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
     if exit {
         if let Ok(mut p) = s.parser.lock() {
-            p.screen_mut().set_scrollback(0);
+            p.scroll(Scroll::Bottom);
         }
         app.mode = Mode::Dashboard;
         return Ok(());
     }
 
-    let rows = s.size.0 as usize;
-    let new_offset = match key.code {
-        KeyCode::Up | KeyCode::Char('k') => current + 1,
-        KeyCode::Down | KeyCode::Char('j') => current.saturating_sub(1),
-        KeyCode::PageUp | KeyCode::Char('b') => current + rows.max(1),
-        KeyCode::PageDown | KeyCode::Char('f') | KeyCode::Char(' ') => {
-            current.saturating_sub(rows.max(1))
-        }
-        KeyCode::Home | KeyCode::Char('g') => 4096,
-        KeyCode::End | KeyCode::Char('G') => 0,
+    let scroll = match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Scroll::Delta(1),
+        KeyCode::Down | KeyCode::Char('j') => Scroll::Delta(-1),
+        KeyCode::PageUp | KeyCode::Char('b') => Scroll::PageUp,
+        KeyCode::PageDown | KeyCode::Char('f') | KeyCode::Char(' ') => Scroll::PageDown,
+        KeyCode::Home | KeyCode::Char('g') => Scroll::Top,
+        KeyCode::End | KeyCode::Char('G') => Scroll::Bottom,
         _ => {
             app.mode = Mode::Scrollback(id);
             return Ok(());
@@ -211,7 +209,7 @@ fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
     };
 
     if let Ok(mut p) = s.parser.lock() {
-        p.screen_mut().set_scrollback(new_offset);
+        p.scroll(scroll);
     }
     app.mode = Mode::Scrollback(id);
     Ok(())
@@ -304,12 +302,12 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         _ => {}
     }
-    if std::env::var_os("TMUX_CLAUDE_DEBUG").is_some() {
+    if std::env::var_os("CMUX_DEBUG").is_some() {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/tmux-claude-keys.log")
+            .open("/tmp/cmux-keys.log")
         {
             let mode_after = format!("{:?}", std::mem::discriminant(&app.mode));
             let _ = writeln!(

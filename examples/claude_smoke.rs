@@ -20,9 +20,9 @@ fn main() -> Result<()> {
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader()?;
-    let parser = Arc::new(Mutex::new(vt100::Parser::new(30, 100, 4096)));
+    let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let p = parser.clone();
+    let raw_t = raw.clone();
     let t = thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut total = 0usize;
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
                 Ok(0) => break,
                 Ok(n) => {
                     total += n;
-                    p.lock().unwrap().process(&buf[..n]);
+                    raw_t.lock().unwrap().extend_from_slice(&buf[..n]);
                 }
                 Err(_) => break,
             }
@@ -44,10 +44,9 @@ fn main() -> Result<()> {
     drop(pair.master);
     let bytes = t.join().unwrap_or(0);
 
-    let g = parser.lock().unwrap();
-    let screen = g.screen();
-    println!("--- {} bytes received; vt100 render ---", bytes);
-    println!("{}", screen.contents());
+    let buf = raw.lock().unwrap();
+    println!("--- {} bytes received ---", bytes);
+    println!("{}", String::from_utf8_lossy(&buf));
     println!("--- end ---");
     Ok(())
 }

@@ -16,15 +16,15 @@ fn main() -> Result<()> {
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader()?;
-    let parser = Arc::new(Mutex::new(vt100::Parser::new(12, 60, 1024)));
+    let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let p = parser.clone();
+    let raw_t = raw.clone();
     let t = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => p.lock().unwrap().process(&buf[..n]),
+                Ok(n) => raw_t.lock().unwrap().extend_from_slice(&buf[..n]),
                 Err(_) => break,
             }
         }
@@ -35,13 +35,9 @@ fn main() -> Result<()> {
     drop(pair.master);
     let _ = t.join();
 
-    let g = parser.lock().unwrap();
-    let screen = g.screen();
-    println!("--- vt100 rendered contents ({} rows) ---", screen.size().0);
-    println!("{}", screen.contents());
+    let buf = raw.lock().unwrap();
+    println!("--- raw PTY bytes ({} bytes) ---", buf.len());
+    println!("{}", String::from_utf8_lossy(&buf));
     println!("--- end ---");
-
-    let row0_red = screen.cell(0, 0).map(|c| format!("'{}' fg={:?}", c.contents(), c.fgcolor())).unwrap_or_default();
-    println!("cell(0,0) = {}", row0_red);
     Ok(())
 }

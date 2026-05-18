@@ -1,1 +1,36 @@
+# Rust build artifacts
 /target
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug + profiling
+*.log
+core
+*.core
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Local env / secrets
+.env
+.env.*
+.envrc
+
+# Rust analyzer / build tooling caches
+.cargo-cache/
+.rustc_info.json
+
+# Backup files
+*.bak
+*.orig
