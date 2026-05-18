@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ratatui::layout::Rect;
 use std::path::{Path, PathBuf};
 
 use crate::session::Session;
@@ -167,6 +168,7 @@ pub struct App {
     pub hide_chrome: bool,
     pub needs_redraw: bool,
     pub persist_dirty: bool,
+    pub last_tile_area: Option<Rect>,
 }
 
 impl App {
@@ -185,6 +187,7 @@ impl App {
             hide_chrome: false,
             needs_redraw: true,
             persist_dirty: false,
+            last_tile_area: None,
         }
     }
 

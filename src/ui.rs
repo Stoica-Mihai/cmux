@@ -10,16 +10,19 @@ use crate::term_render::TermWidget;
 
 pub type TileSizes = Vec<(usize, u16, u16)>;
 
-pub fn draw(f: &mut Frame, app: &App, tile_sizes: &mut TileSizes) {
+pub fn draw(f: &mut Frame, app: &mut App, tile_sizes: &mut TileSizes) {
     tile_sizes.clear();
     let area = f.area();
+    app.last_tile_area = None;
 
     if app.hide_chrome
         && let Some(session) = app.sessions.get(app.focus)
     {
         if let Ok(parser) = session.parser.lock() {
-            f.render_widget(TermWidget::new(&parser.term), area);
+            let widget = TermWidget::new(&parser.term).with_selection(session.selection);
+            f.render_widget(widget, area);
             tile_sizes.push((app.focus, area.height, area.width));
+            app.last_tile_area = Some(area);
         }
         return;
     }
@@ -124,13 +127,17 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         row("↑ / ↓", "cycle focused session"),
         row("1 .. 9", "jump to session N"),
         row("z", "toggle sidebar"),
-        row("x", "toggle chrome (hide borders/sidebar/footer for mouse-select)"),
+        row("x", "toggle chrome (hide borders/sidebar/footer)"),
         row("a", "send literal Ctrl+A to focused claude"),
         row("?", "this help"),
         row("q", "quit (kills all sessions)"),
         Line::from(""),
         header(" Global"),
         row("Ctrl+Q", "hard quit from anywhere"),
+        Line::from(""),
+        header(" Mouse"),
+        note("drag inside tile → copies selection via OSC 52"),
+        note("Shift+drag → bypass cmux, use outer terminal selection"),
         Line::from(""),
         header(" Sidebar badges"),
         note("● green  busy (claude working)"),
@@ -339,7 +346,7 @@ fn draw_rename_popup(f: &mut Frame, area: Rect, state: &crate::app::RenameState,
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_dashboard(f: &mut Frame, app: &App, area: Rect, tile_sizes: &mut TileSizes) {
+fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect, tile_sizes: &mut TileSizes) {
     let (sidebar, main) = if app.show_sidebar {
         let split = Layout::default()
             .direction(Direction::Horizontal)
@@ -375,6 +382,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect, tile_sizes: &mut TileSiz
     if let Some(session) = app.sessions.get(app.focus) {
         let inner = draw_tile(f, session, main, true, false, app.focus + 1);
         tile_sizes.push((app.focus, inner.height, inner.width));
+        app.last_tile_area = Some(inner);
     }
 }
 
@@ -487,7 +495,7 @@ fn draw_tile(
     f.render_widget(block, area);
 
     if let Ok(parser) = session.parser.lock() {
-        let widget = TermWidget::new(&parser.term);
+        let widget = TermWidget::new(&parser.term).with_selection(session.selection);
         f.render_widget(widget, inner);
     }
     inner

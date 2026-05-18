@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -26,14 +29,14 @@ use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 fn main() -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
+    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let res = run(&mut terminal);
 
     disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
+    execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     res
 }
 
@@ -82,7 +85,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
         let elapsed = now.saturating_sub(last_draw_ms);
         if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
-            terminal.draw(|f| ui::draw(f, &app, &mut tile_sizes))?;
+            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
             for (idx, rows, cols) in tile_sizes.drain(..) {
                 if let Some(s) = app.sessions.get_mut(idx) {
                     let _ = s.resize(rows.max(2), cols.max(4));
@@ -109,6 +112,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
                     resize_all(&mut app);
                     app.needs_redraw = true;
                 }
+                Event::Mouse(me) => {
+                    handle_mouse(&mut app, me);
+                }
                 _ => {}
             }
         }
@@ -121,6 +127,94 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
         flush_persist(&app);
     }
     Ok(())
+}
+
+fn handle_mouse(app: &mut App, me: MouseEvent) {
+    let Some(tile) = app.last_tile_area else { return };
+    let inside = me.column >= tile.x
+        && me.column < tile.x + tile.width
+        && me.row >= tile.y
+        && me.row < tile.y + tile.height;
+
+    match me.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if inside {
+                let row = me.row - tile.y;
+                let col = me.column - tile.x;
+                if let Some(s) = app.sessions.get_mut(app.focus) {
+                    s.selection = Some(term_render::TileSelection::new(row, col));
+                    app.needs_redraw = true;
+                }
+            } else if let Some(s) = app.sessions.get_mut(app.focus)
+                && s.selection.is_some()
+            {
+                s.selection = None;
+                app.needs_redraw = true;
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if inside => {
+            if let Some(s) = app.sessions.get_mut(app.focus)
+                && let Some(sel) = s.selection.as_mut()
+            {
+                let row = me.row - tile.y;
+                let col = me.column - tile.x;
+                sel.tip = (row, col);
+                app.needs_redraw = true;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(s) = app.sessions.get(app.focus) else { return };
+            let Some(sel) = s.selection else { return };
+            let Ok(p) = s.parser.lock() else { return };
+            let text = term_render::extract_selection(&p.term, sel);
+            drop(p);
+            if !text.trim().is_empty() {
+                emit_osc52(&text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn emit_osc52(text: &str) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let encoded = base64_encode(text.as_bytes());
+    let _ = write!(stdout, "\x1b]52;c;{}\x07", encoded);
+    let _ = stdout.flush();
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let b0 = input[i];
+        let b1 = input[i + 1];
+        let b2 = input[i + 2];
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[((b0 & 0x03) << 4 | (b1 >> 4)) as usize] as char);
+        out.push(ALPHABET[((b1 & 0x0f) << 2 | (b2 >> 6)) as usize] as char);
+        out.push(ALPHABET[(b2 & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let b0 = input[i];
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let b0 = input[i];
+        let b1 = input[i + 1];
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[((b0 & 0x03) << 4 | (b1 >> 4)) as usize] as char);
+        out.push(ALPHABET[((b1 & 0x0f) << 2) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 fn log_key(key: &KeyEvent, prefix_pending: bool) {

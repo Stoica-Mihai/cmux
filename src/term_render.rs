@@ -28,17 +28,120 @@ impl Dimensions for TermSize {
 
 pub struct TermWidget<'a> {
     term: &'a Term<VoidListener>,
+    selection: Option<TileSelection>,
 }
 
 impl<'a> TermWidget<'a> {
     pub fn new(term: &'a Term<VoidListener>) -> Self {
-        Self { term }
+        Self {
+            term,
+            selection: None,
+        }
+    }
+
+    pub fn with_selection(mut self, sel: Option<TileSelection>) -> Self {
+        self.selection = sel;
+        self
     }
 }
 
 fn is_continuation(cell: &Cell) -> bool {
     cell.flags.contains(Flags::WIDE_CHAR_SPACER)
         || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+}
+
+/// Viewport-relative selection between two cells. Coordinates are 0-indexed
+/// row, col within the focused tile's inner area. The two endpoints may be in
+/// any order; `normalized()` produces (top-left, bottom-right) in linear text
+/// order.
+#[derive(Debug, Clone, Copy)]
+pub struct TileSelection {
+    pub anchor: (u16, u16),
+    pub tip: (u16, u16),
+}
+
+impl TileSelection {
+    pub fn new(row: u16, col: u16) -> Self {
+        Self {
+            anchor: (row, col),
+            tip: (row, col),
+        }
+    }
+
+    /// Returns (start_row, start_col, end_row, end_col) ordered for a linear
+    /// row-major sweep.
+    pub fn normalized(&self) -> (u16, u16, u16, u16) {
+        let (ar, ac) = self.anchor;
+        let (br, bc) = self.tip;
+        if (ar, ac) <= (br, bc) {
+            (ar, ac, br, bc)
+        } else {
+            (br, bc, ar, ac)
+        }
+    }
+
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        let (sr, sc, er, ec) = self.normalized();
+        if row < sr || row > er {
+            return false;
+        }
+        if sr == er {
+            col >= sc && col <= ec
+        } else if row == sr {
+            col >= sc
+        } else if row == er {
+            col <= ec
+        } else {
+            true
+        }
+    }
+}
+
+/// Extract text from the focused tile within the selection range.
+/// Walks `display_iter` and emits characters in row-major order, inserting
+/// '\n' at row breaks.
+pub fn extract_selection(term: &Term<VoidListener>, sel: TileSelection) -> String {
+    let (sr, sc, er, ec) = sel.normalized();
+    let display_offset = term.grid().display_offset() as i32;
+    let viewport_top = -display_offset;
+    let mut out = String::new();
+    let mut current_row: Option<u16> = None;
+    for indexed in term.grid().display_iter() {
+        let row_i = indexed.point.line.0 - viewport_top;
+        if row_i < 0 {
+            continue;
+        }
+        let row = row_i as u16;
+        let col = indexed.point.column.0 as u16;
+        if !sel.contains(row, col) {
+            continue;
+        }
+        if let Some(prev) = current_row
+            && prev != row
+        {
+            for _ in prev..row {
+                out.push('\n');
+            }
+        }
+        current_row = Some(row);
+        if is_continuation(indexed.cell) {
+            continue;
+        }
+        let c = indexed.cell.c;
+        out.push(if c == '\0' { ' ' } else { c });
+        // also flush any zerowidth combiners attached to this cell
+        if let Some(extras) = indexed.cell.zerowidth() {
+            for &zc in extras {
+                out.push(zc);
+            }
+        }
+        let _ = (sr, sc, er, ec);
+    }
+    // trim trailing whitespace from each line for cleanliness
+    out.lines()
+        .map(|l| l.trim_end_matches(' '))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 const PALETTE_LEN: usize = 269;
@@ -104,6 +207,14 @@ impl<'a> Widget for TermWidget<'a> {
             }
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg;
+            }
+
+            let in_selection = self
+                .selection
+                .map(|s| s.contains(row as u16, col as u16))
+                .unwrap_or(false);
+            if in_selection {
+                std::mem::swap(&mut fg, &mut bg);
             }
 
             let style = Style::default().fg(fg).bg(bg).add_modifier(mods);

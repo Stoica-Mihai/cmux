@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::debug_log;
-use crate::term_render::{self, TermSize};
+use crate::term_render::{self, TermSize, TileSelection};
 use crate::util::{claude_sessions_dir, now_ms};
 
 const SCROLLBACK_LINES: usize = 4096;
@@ -112,6 +112,7 @@ pub struct Session {
     pub claude_name: Option<String>,
     pub permission_pending: bool,
     pub manually_renamed: bool,
+    pub selection: Option<TileSelection>,
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
     master: Box<dyn MasterPty + Send>,
@@ -207,6 +208,7 @@ impl Session {
             claude_name: None,
             permission_pending: false,
             manually_renamed: false,
+            selection: None,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             master: pair.master,
