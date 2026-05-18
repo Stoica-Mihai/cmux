@@ -79,8 +79,6 @@ pub struct Session {
     pub size: (u16, u16),
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
-    #[allow(dead_code)]
-    pub created_ms: u64,
     pub pid: Option<u32>,
     pub claude_status: String,
     pub claude_name: Option<String>,
@@ -133,8 +131,7 @@ impl Session {
         let writer = pair.master.take_writer().context("take writer")?;
         let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
-        let spawn_ms = now_ms();
-        let last_active_ms = Arc::new(AtomicU64::new(spawn_ms));
+        let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
 
         let reader_thread = {
             let parser = parser.clone();
@@ -172,7 +169,6 @@ impl Session {
             size: (rows, cols),
             alive,
             last_active_ms,
-            created_ms: spawn_ms,
             pid,
             claude_status: String::new(),
             claude_name: None,
@@ -200,15 +196,19 @@ impl Session {
                 && let Ok(bytes) = std::fs::read(&path)
                 && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
             {
-                if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
+                if let Some(s) = v.get("status").and_then(|x| x.as_str())
+                    && self.claude_status != s
+                {
                     self.claude_status = s.to_string();
                 }
-                if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
-                    let n = n.to_string();
-                    if !self.manually_renamed && !n.is_empty() && self.claude_name.as_deref() != Some(&n) {
-                        self.label = n.clone();
+                if let Some(n) = v.get("name").and_then(|x| x.as_str())
+                    && !n.is_empty()
+                    && self.claude_name.as_deref() != Some(n)
+                {
+                    if !self.manually_renamed {
+                        self.label = n.to_string();
                     }
-                    self.claude_name = Some(n);
+                    self.claude_name = Some(n.to_string());
                 }
             }
         }
@@ -270,14 +270,6 @@ impl Session {
                 false
             }
             _ => true,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn exit_status(&mut self) -> Option<String> {
-        match self.child.try_wait() {
-            Ok(Some(status)) => Some(format!("{}", status)),
-            _ => None,
         }
     }
 

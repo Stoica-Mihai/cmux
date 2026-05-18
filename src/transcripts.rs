@@ -75,15 +75,22 @@ fn extract_cwd(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
+    use std::collections::VecDeque;
     use std::io::{BufRead, BufReader};
     let Ok(f) = std::fs::File::open(path) else {
         return String::from("(unable to read transcript)");
     };
     let reader = BufReader::new(f);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    let start = lines.len().saturating_sub(max_lines * 3);
+    let cap = max_lines * 3;
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(cap);
+    for line in reader.lines().map_while(Result::ok) {
+        if tail.len() == cap {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
     let mut out: Vec<String> = Vec::new();
-    for raw in &lines[start..] {
+    for raw in &tail {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
             continue;
         };
