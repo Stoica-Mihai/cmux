@@ -2,7 +2,6 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color as AlaColor, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -42,6 +41,8 @@ fn is_continuation(cell: &Cell) -> bool {
         || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
 }
 
+const PALETTE_LEN: usize = 269;
+
 impl<'a> Widget for TermWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
@@ -52,6 +53,11 @@ impl<'a> Widget for TermWidget<'a> {
         let palette = content.colors;
         let mode = content.mode;
         let cursor = content.cursor;
+
+        let mut palette_table: [Option<RColor>; PALETTE_LEN] = [None; PALETTE_LEN];
+        for i in 0..PALETTE_LEN {
+            palette_table[i] = palette[i].map(rgb_to_ratatui);
+        }
 
         let max_rows = area.height as usize;
         let max_cols = area.width as usize;
@@ -74,8 +80,8 @@ impl<'a> Widget for TermWidget<'a> {
             }
 
             let (mut fg, mut bg) = (
-                convert_color(cell.fg, palette, true),
-                convert_color(cell.bg, palette, false),
+                convert_color(cell.fg, &palette_table),
+                convert_color(cell.bg, &palette_table),
             );
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
@@ -149,16 +155,16 @@ impl<'a> Widget for TermWidget<'a> {
     }
 }
 
-fn convert_color(c: AlaColor, palette: &Colors, _is_fg: bool) -> RColor {
+fn convert_color(c: AlaColor, table: &[Option<RColor>; PALETTE_LEN]) -> RColor {
     match c {
         AlaColor::Spec(rgb) => rgb_to_ratatui(rgb),
-        AlaColor::Named(named) => match palette[named] {
-            Some(rgb) => rgb_to_ratatui(rgb),
-            None => named_to_ratatui(named),
-        },
+        AlaColor::Named(named) => {
+            table[named as usize].unwrap_or_else(|| named_to_ratatui(named))
+        }
         AlaColor::Indexed(i) => {
-            if let Some(rgb) = palette[i as usize] {
-                rgb_to_ratatui(rgb)
+            let idx = i as usize;
+            if let Some(c) = table.get(idx).copied().flatten() {
+                c
             } else if i < 16 {
                 named_to_ratatui(indexed_low_to_named(i))
             } else {

@@ -17,6 +17,33 @@ use crate::util::{claude_sessions_dir, now_ms};
 
 const SCROLLBACK_LINES: usize = 4096;
 
+const PROMPT_NEEDLES: &[&str] = &[
+    "do you want to proceed",
+    "allow this",
+    "apply this edit",
+    "requires approval",
+    "don't ask again",
+    "esc to cancel",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClaudeStatus {
+    #[default]
+    Unknown,
+    Busy,
+    Idle,
+}
+
+impl ClaudeStatus {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "busy" => Self::Busy,
+            "idle" => Self::Idle,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize {
         rows,
@@ -81,11 +108,12 @@ pub struct Session {
     pub last_active_ms: Arc<AtomicU64>,
     pub dirty: Arc<AtomicBool>,
     pub pid: Option<u32>,
-    pub claude_status: String,
+    pub claude_status: ClaudeStatus,
     pub claude_name: Option<String>,
     pub permission_pending: bool,
     pub manually_renamed: bool,
     last_status_check_ms: u64,
+    last_perm_check_active_ms: u64,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -175,11 +203,12 @@ impl Session {
             last_active_ms,
             dirty,
             pid,
-            claude_status: String::new(),
+            claude_status: ClaudeStatus::Unknown,
             claude_name: None,
             permission_pending: false,
             manually_renamed: false,
             last_status_check_ms: 0,
+            last_perm_check_active_ms: 0,
             master: pair.master,
             writer,
             child,
@@ -201,10 +230,11 @@ impl Session {
                 && let Ok(bytes) = std::fs::read(&path)
                 && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
             {
-                if let Some(s) = v.get("status").and_then(|x| x.as_str())
-                    && self.claude_status != s
-                {
-                    self.claude_status = s.to_string();
+                if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
+                    let next = ClaudeStatus::from_str(s);
+                    if self.claude_status != next {
+                        self.claude_status = next;
+                    }
                 }
                 if let Some(n) = v.get("name").and_then(|x| x.as_str())
                     && !n.is_empty()
@@ -218,7 +248,11 @@ impl Session {
             }
         }
 
-        self.permission_pending = self.detect_permission_prompt();
+        let last_active = self.last_active_ms.load(Ordering::SeqCst);
+        if last_active != self.last_perm_check_active_ms {
+            self.permission_pending = self.detect_permission_prompt();
+            self.last_perm_check_active_ms = last_active;
+        }
     }
 
     fn detect_permission_prompt(&self) -> bool {
@@ -231,14 +265,11 @@ impl Session {
             text
         );
         let lower = text.to_lowercase();
-        lower.contains("do you want to proceed")
-            || lower.contains("allow this")
-            || lower.contains("apply this edit")
-            || lower.contains("requires approval")
-            || lower.contains("don't ask again")
-            || lower.contains("esc to cancel")
-            || (lower.contains("1. yes") && lower.contains("3. no"))
-            || (lower.contains("1. yes") && lower.contains("2. no"))
+        if PROMPT_NEEDLES.iter().any(|n| lower.contains(n)) {
+            return true;
+        }
+        let has_yes = lower.contains("1. yes");
+        has_yes && (lower.contains("2. no") || lower.contains("3. no"))
     }
 
     pub fn activity_age_ms(&self) -> u64 {

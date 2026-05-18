@@ -388,9 +388,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             ("✕", Color::Red)
         } else if s.permission_pending {
             ("⚠", Color::LightRed)
-        } else if s.claude_status == "busy" || age_ms < 1500 {
+        } else if s.claude_status == crate::session::ClaudeStatus::Busy || age_ms < 1500 {
             ("●", Color::Green)
-        } else if s.claude_status == "idle" {
+        } else if s.claude_status == crate::session::ClaudeStatus::Idle {
             ("○", Color::Cyan)
         } else if age_ms < 30_000 {
             ("○", Color::Yellow)

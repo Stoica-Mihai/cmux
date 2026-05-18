@@ -165,6 +165,7 @@ pub struct App {
     pub prefix_pending: bool,
     pub show_sidebar: bool,
     pub needs_redraw: bool,
+    pub persist_dirty: bool,
 }
 
 impl App {
@@ -181,6 +182,7 @@ impl App {
             prefix_pending: false,
             show_sidebar: true,
             needs_redraw: true,
+            persist_dirty: false,
         }
     }
 

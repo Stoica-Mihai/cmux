@@ -59,20 +59,27 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             s.manually_renamed = ps.manually_renamed;
         }
     }
-    persist_now(&app);
+    flush_persist(&app);
 
     let debug = util::debug_enabled();
     let mut tile_sizes: ui::TileSizes = Vec::new();
     let mut last_draw_ms: u64 = 0;
+    let mut last_persist_ms: u64 = util::now_ms();
     const HEARTBEAT_MS: u64 = 250;
+    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
     loop {
         app.reap_dead();
+        let now = util::now_ms();
+        if app.persist_dirty && now.saturating_sub(last_persist_ms) >= PERSIST_DEBOUNCE_MS {
+            flush_persist(&app);
+            app.persist_dirty = false;
+            last_persist_ms = now;
+        }
 
         let any_session_dirty = app
             .sessions
             .iter()
             .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
-        let now = util::now_ms();
         let elapsed = now.saturating_sub(last_draw_ms);
         if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
             terminal.draw(|f| ui::draw(f, &app, &mut tile_sizes))?;
@@ -109,6 +116,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
         if app.should_quit {
             break;
         }
+    }
+    if app.persist_dirty {
+        flush_persist(&app);
     }
     Ok(())
 }
@@ -174,12 +184,12 @@ fn handle_reorder(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             move_focused(app, -1);
-            persist_now(app);
+            app.persist_dirty = true;
             app.mode = Mode::Reorder;
         }
         KeyCode::Down | KeyCode::Char('j') => {
             move_focused(app, 1);
-            persist_now(app);
+            app.persist_dirty = true;
             app.mode = Mode::Reorder;
         }
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
@@ -234,7 +244,7 @@ fn handle_confirm_detach(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
             if let Some(idx) = app.sessions.iter().position(|s| s.id == id) {
                 app.focus = idx;
                 app.detach_focused();
-                persist_now(app);
+                app.persist_dirty = true;
             }
             app.mode = Mode::Dashboard;
         }
@@ -275,7 +285,7 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
         'z' => {
             app.show_sidebar = !app.show_sidebar;
             resize_all(app);
-            persist_now(app);
+            app.persist_dirty = true;
         }
         'r' => {
             if let Some(s) = app.sessions.get(app.focus) {
@@ -380,7 +390,7 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
                             util::PREFIX_HINT
                         );
                         resize_all(app);
-                        persist_now(app);
+                        app.persist_dirty = true;
                     }
                     Err(e) => {
                         app.status = format!("resume failed: {}", e);
@@ -416,7 +426,7 @@ fn handle_rename(app: &mut App, mut state: RenameState, key: KeyEvent) -> Result
                 s.manually_renamed = true;
             }
             app.mode = Mode::Dashboard;
-            persist_now(app);
+            app.persist_dirty = true;
         }
         KeyCode::Backspace => {
             state.buf.pop();
@@ -450,7 +460,7 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
                         util::PREFIX_HINT
                     );
                     resize_all(app);
-                    persist_now(app);
+                    app.persist_dirty = true;
                 }
                 Err(e) => {
                     app.status = format!("spawn failed: {}", e);
@@ -508,18 +518,12 @@ fn move_focused(app: &mut App, delta: i32) {
     app.focus = to;
 }
 
-fn persist_now(app: &App) {
+fn flush_persist(app: &App) {
     let sessions = app
         .sessions
         .iter()
         .filter(|s| s.alive.load(std::sync::atomic::Ordering::SeqCst))
-        .map(|s| persist::PersistedSession {
-            cwd: s.cwd.clone(),
-            label: s.label.clone(),
-            dangerous: s.dangerous,
-            resume_id: s.resume_id.clone(),
-            manually_renamed: s.manually_renamed,
-        })
+        .map(persist::PersistedSession::from)
         .collect();
     let state = persist::PersistedState {
         sessions,

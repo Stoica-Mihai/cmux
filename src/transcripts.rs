@@ -76,19 +76,42 @@ fn extract_cwd(path: &Path) -> Option<PathBuf> {
 
 pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
     use std::collections::VecDeque;
-    use std::io::{BufRead, BufReader};
-    let Ok(f) = std::fs::File::open(path) else {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else {
         return String::from("(unable to read transcript)");
     };
-    let reader = BufReader::new(f);
     let cap = max_lines * 3;
-    let mut tail: VecDeque<String> = VecDeque::with_capacity(cap);
-    for line in reader.lines().map_while(Result::ok) {
-        if tail.len() == cap {
-            tail.pop_front();
+    let file_size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let tail: VecDeque<String> = if file_size > TAIL_BYTES {
+        // seek near end, discard partial first line, parse the rest
+        if f.seek(SeekFrom::End(-(TAIL_BYTES as i64))).is_err() {
+            return String::from("(unable to seek transcript)");
         }
-        tail.push_back(line);
-    }
+        let mut buf = String::new();
+        if f.take(TAIL_BYTES).read_to_string(&mut buf).is_err() {
+            return String::from("(unable to read transcript tail)");
+        }
+        let start = buf.find('\n').map(|i| i + 1).unwrap_or(0);
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(cap);
+        for line in buf[start..].lines() {
+            if tail.len() == cap {
+                tail.pop_front();
+            }
+            tail.push_back(line.to_string());
+        }
+        tail
+    } else {
+        let reader = BufReader::new(f);
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(cap);
+        for line in reader.lines().map_while(Result::ok) {
+            if tail.len() == cap {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+        tail
+    };
     let mut out: Vec<String> = Vec::new();
     for raw in &tail {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {

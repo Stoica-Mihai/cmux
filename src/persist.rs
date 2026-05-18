@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::session::Session;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PersistedSession {
     pub cwd: PathBuf,
@@ -12,6 +14,18 @@ pub struct PersistedSession {
     pub resume_id: Option<String>,
     #[serde(default)]
     pub manually_renamed: bool,
+}
+
+impl From<&Session> for PersistedSession {
+    fn from(s: &Session) -> Self {
+        Self {
+            cwd: s.cwd.clone(),
+            label: s.label.clone(),
+            dangerous: s.dangerous,
+            resume_id: s.resume_id.clone(),
+            manually_renamed: s.manually_renamed,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
