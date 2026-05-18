@@ -225,6 +225,28 @@ fn named_to_ratatui(n: NamedColor) -> RColor {
     }
 }
 
+pub fn visible_text(term: &Term<VoidListener>) -> String {
+    let mut out = String::new();
+    let mut current_line: Option<i32> = None;
+    for indexed in term.grid().display_iter() {
+        let line = indexed.point.line.0;
+        if Some(line) != current_line {
+            if current_line.is_some() {
+                out.push('\n');
+            }
+            current_line = Some(line);
+        }
+        if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+            || indexed.cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        let c = indexed.cell.c;
+        out.push(if c == '\0' { ' ' } else { c });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,26 +297,4 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "X");
         assert_eq!(buf[(0, 0)].fg, RColor::Red);
     }
-}
-
-pub fn visible_text(term: &Term<VoidListener>) -> String {
-    let mut out = String::new();
-    let mut current_line: Option<i32> = None;
-    for indexed in term.grid().display_iter() {
-        let line = indexed.point.line.0;
-        if Some(line) != current_line {
-            if current_line.is_some() {
-                out.push('\n');
-            }
-            current_line = Some(line);
-        }
-        if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-            || indexed.cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-        {
-            continue;
-        }
-        let c = indexed.cell.c;
-        out.push(if c == '\0' { ' ' } else { c });
-    }
-    out
 }
