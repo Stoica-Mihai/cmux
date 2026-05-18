@@ -15,18 +15,6 @@ pub fn draw(f: &mut Frame, app: &mut App, tile_sizes: &mut TileSizes) {
     let area = f.area();
     app.last_tile_area = None;
 
-    if app.hide_chrome
-        && let Some(session) = app.sessions.get(app.focus)
-    {
-        if let Ok(parser) = session.parser.lock() {
-            let widget = TermWidget::new(&parser.term).with_selection(session.selection);
-            f.render_widget(widget, area);
-            tile_sizes.push((app.focus, area.height, area.width));
-            app.last_tile_area = Some(area);
-        }
-        return;
-    }
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -127,7 +115,6 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         row("↑ / ↓", "cycle focused session"),
         row("1 .. 9", "jump to session N"),
         row("z", "toggle sidebar"),
-        row("x", "toggle chrome (hide borders/sidebar/footer)"),
         row("a", "send literal Ctrl+A to focused claude"),
         row("?", "this help"),
         row("q", "quit (kills all sessions)"),
@@ -593,7 +580,7 @@ fn footer_for(app: &App) -> Line<'static> {
     let prefix_pending = app.prefix_pending;
     if prefix_pending {
         return Line::from(Span::styled(
-            " PREFIX  n=new  ↑↓=cycle  d=detach  l=load  x=chrome  ?=more ".to_string(),
+            " PREFIX  n=new  ↑↓=cycle  d=detach  l=load  ?=more ".to_string(),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
