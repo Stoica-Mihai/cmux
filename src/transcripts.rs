@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub struct Transcript {
@@ -38,26 +38,26 @@ pub fn scan() -> Vec<Transcript> {
             });
         }
     }
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|t| std::cmp::Reverse(t.mtime));
     out
 }
 
-fn extract_cwd(path: &PathBuf) -> Option<PathBuf> {
+fn extract_cwd(path: &Path) -> Option<PathBuf> {
     use std::io::{BufRead, BufReader};
     let f = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(f);
     for line in reader.lines().take(40).flatten() {
         let v: serde_json::Value = serde_json::from_str(&line).ok()?;
-        if let Some(cwd) = v.get("cwd").and_then(|x| x.as_str()) {
-            if !cwd.is_empty() {
-                return Some(PathBuf::from(cwd));
-            }
+        if let Some(cwd) = v.get("cwd").and_then(|x| x.as_str())
+            && !cwd.is_empty()
+        {
+            return Some(PathBuf::from(cwd));
         }
     }
     None
 }
 
-fn decode_slug(dir: &PathBuf) -> PathBuf {
+fn decode_slug(dir: &Path) -> PathBuf {
     let name = dir
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -75,7 +75,7 @@ pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
         return String::from("(unable to read transcript)");
     };
     let reader = BufReader::new(f);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let start = lines.len().saturating_sub(max_lines * 3);
     let mut out: Vec<String> = Vec::new();
     for raw in &lines[start..] {

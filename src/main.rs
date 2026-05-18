@@ -48,13 +48,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
         } else {
             app.spawn_session(ps.cwd.clone(), ps.dangerous)
         };
-        if res.is_ok() {
-            if let Some(s) = app.sessions.last_mut() {
-                if !ps.label.is_empty() {
-                    s.label = ps.label;
-                }
-                s.manually_renamed = ps.manually_renamed;
+        if res.is_ok()
+            && let Some(s) = app.sessions.last_mut()
+        {
+            if !ps.label.is_empty() {
+                s.label = ps.label;
             }
+            s.manually_renamed = ps.manually_renamed;
         }
     }
     persist_now(&app);
@@ -288,10 +288,8 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
         '?' => {
             app.mode = Mode::Help;
         }
-        'm' => {
-            if !app.sessions.is_empty() {
-                app.mode = Mode::Reorder;
-            }
+        'm' if !app.sessions.is_empty() => {
+            app.mode = Mode::Reorder;
         }
         c if c.is_ascii_digit() => {
             let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
@@ -325,10 +323,10 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_dashboard(app: &mut App, key: KeyEvent) -> Result<()> {
-    if let Some(s) = app.sessions.get_mut(app.focus) {
-        if let Some(bytes) = keys::encode(key) {
-            let _ = s.write(&bytes);
-        }
+    if let Some(s) = app.sessions.get_mut(app.focus)
+        && let Some(bytes) = keys::encode(key)
+    {
+        let _ = s.write(&bytes);
     }
     Ok(())
 }
@@ -404,11 +402,11 @@ fn handle_rename(app: &mut App, mut state: RenameState, key: KeyEvent) -> Result
         }
         KeyCode::Enter => {
             let new_label = state.buf.trim().to_string();
-            if !new_label.is_empty() {
-                if let Some(s) = app.sessions.iter_mut().find(|s| s.id == state.session_id) {
-                    s.label = new_label;
-                    s.manually_renamed = true;
-                }
+            if !new_label.is_empty()
+                && let Some(s) = app.sessions.iter_mut().find(|s| s.id == state.session_id)
+            {
+                s.label = new_label;
+                s.manually_renamed = true;
             }
             app.mode = Mode::Dashboard;
             persist_now(app);

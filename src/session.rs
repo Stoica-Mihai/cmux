@@ -203,20 +203,19 @@ impl Session {
             let path = std::env::var_os("HOME")
                 .map(std::path::PathBuf::from)
                 .map(|h| h.join(".claude").join("sessions").join(format!("{}.json", pid)));
-            if let Some(path) = path {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                        if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
-                            self.claude_status = s.to_string();
-                        }
-                        if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
-                            let n = n.to_string();
-                            if !self.manually_renamed && !n.is_empty() && self.claude_name.as_deref() != Some(&n) {
-                                self.label = n.clone();
-                            }
-                            self.claude_name = Some(n);
-                        }
+            if let Some(path) = path
+                && let Ok(bytes) = std::fs::read(&path)
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            {
+                if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
+                    self.claude_status = s.to_string();
+                }
+                if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
+                    let n = n.to_string();
+                    if !self.manually_renamed && !n.is_empty() && self.claude_name.as_deref() != Some(&n) {
+                        self.label = n.clone();
                     }
+                    self.claude_name = Some(n);
                 }
             }
         }
@@ -227,15 +226,14 @@ impl Session {
     fn detect_permission_prompt(&self) -> bool {
         let Ok(p) = self.parser.lock() else { return false };
         let text = term_render::visible_text(&p.term);
-        if std::env::var_os("CMUX_DEBUG").is_some() {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
+        if std::env::var_os("CMUX_DEBUG").is_some()
+            && let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(format!("/tmp/cmux-screen-{}.txt", self.id))
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "\n========= scan at id={} =========\n{}\n", self.id, text);
-            }
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "\n========= scan at id={} =========\n{}\n", self.id, text);
         }
         let lower = text.to_lowercase();
         lower.contains("do you want to proceed")

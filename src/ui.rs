@@ -37,8 +37,8 @@ pub fn draw(f: &mut Frame, app: &App, tile_sizes: &mut TileSizes) {
 }
 
 fn draw_help_popup(f: &mut Frame, area: Rect) {
-    let w = area.width.saturating_sub(4).min(76).max(60);
-    let h = area.height.saturating_sub(2).min(28).max(20);
+    let w = area.width.saturating_sub(4).clamp(60, 76);
+    let h = area.height.saturating_sub(2).clamp(20, 28);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = Rect { x, y, width: w, height: h };
@@ -110,7 +110,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
 }
 
 fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
-    let w = area.width.min(60).max(40);
+    let w = area.width.clamp(40, 60);
     let h: u16 = 7;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -292,7 +292,7 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
 }
 
 fn draw_rename_popup(f: &mut Frame, area: Rect, state: &crate::app::RenameState, app: &App) {
-    let w = area.width.min(60).max(30);
+    let w = area.width.clamp(30, 60);
     let h: u16 = 7;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -492,8 +492,8 @@ fn draw_tile(
 }
 
 fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
-    let w = area.width.saturating_sub(8).min(90).max(50);
-    let h = area.height.saturating_sub(4).min(28).max(14);
+    let w = area.width.saturating_sub(8).clamp(50, 90);
+    let h = area.height.saturating_sub(4).clamp(14, 28);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = Rect { x, y, width: w, height: h };

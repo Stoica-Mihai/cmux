@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::session::Session;
 
@@ -80,7 +80,7 @@ impl PickerState {
     }
 }
 
-fn dirs_path(cwd: &PathBuf, session_id: &str) -> PathBuf {
+fn dirs_path(cwd: &Path, session_id: &str) -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -144,10 +144,10 @@ impl SpawnState {
             self.cwd = p.to_path_buf();
             self.selected = 0;
             self.refresh();
-            if let Some(name) = came_from {
-                if let Some(idx) = self.entries.iter().position(|p| p.file_name() == Some(&name)) {
-                    self.selected = idx;
-                }
+            if let Some(name) = came_from
+                && let Some(idx) = self.entries.iter().position(|p| p.file_name() == Some(&name))
+            {
+                self.selected = idx;
             }
         }
     }
@@ -214,7 +214,7 @@ impl App {
     fn tile_size_for_new(&self) -> (u16, u16) {
         let n = (self.sessions.len() + 1) as u16;
         let cols_grid = (n as f32).sqrt().ceil() as u16;
-        let rows_grid = (n + cols_grid - 1) / cols_grid;
+        let rows_grid = n.div_ceil(cols_grid);
         let (term_rows, term_cols) = self.term_size;
         let body_rows = term_rows.saturating_sub(2);
         let rows = (body_rows / rows_grid.max(1)).saturating_sub(2).max(4);
