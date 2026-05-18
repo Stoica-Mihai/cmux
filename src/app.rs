@@ -164,6 +164,7 @@ pub struct App {
     pub status: String,
     pub prefix_pending: bool,
     pub show_sidebar: bool,
+    pub hide_chrome: bool,
     pub needs_redraw: bool,
     pub persist_dirty: bool,
 }
@@ -181,6 +182,7 @@ impl App {
             status: "Ctrl+A then: n=new  l=load  ↓=next  ↑=prev  1-9=jump  r=rename  d=detach  z=sidebar  q=quit".to_string(),
             prefix_pending: false,
             show_sidebar: true,
+            hide_chrome: false,
             needs_redraw: true,
             persist_dirty: false,
         }

@@ -136,9 +136,15 @@ fn log_key(key: &KeyEvent, prefix_pending: bool) {
 
 fn resize_all(app: &mut App) {
     let (term_rows, term_cols) = app.term_size;
-    let sidebar_w: u16 = if app.show_sidebar { 32 } else { 0 };
-    let main_cols = term_cols.saturating_sub(sidebar_w).saturating_sub(2).max(10);
-    let main_rows = term_rows.saturating_sub(3).max(4);
+    let (main_rows, main_cols) = if app.hide_chrome {
+        (term_rows.max(2), term_cols.max(2))
+    } else {
+        let sidebar_w: u16 = if app.show_sidebar { 32 } else { 0 };
+        (
+            term_rows.saturating_sub(3).max(4),
+            term_cols.saturating_sub(sidebar_w).saturating_sub(2).max(10),
+        )
+    };
     if let Some(s) = app.sessions.get_mut(app.focus) {
         let _ = s.resize(main_rows, main_cols);
     }
@@ -286,6 +292,10 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
             app.show_sidebar = !app.show_sidebar;
             resize_all(app);
             app.persist_dirty = true;
+        }
+        'x' => {
+            app.hide_chrome = !app.hide_chrome;
+            resize_all(app);
         }
         'r' => {
             if let Some(s) = app.sessions.get(app.focus) {

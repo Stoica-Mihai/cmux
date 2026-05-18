@@ -41,6 +41,7 @@ The dashboard is always interactive — keystrokes are forwarded to the focused 
 | `m` | Enter reorder mode (move focused session up/down) |
 | `d` | Detach focused session (asks for confirm; terminates `claude`, removes tile) |
 | `z` | Toggle sidebar (hide for maximum preview width) |
+| `x` | Toggle chrome — hide borders, sidebar, and footer so the focused tile fills the screen. Lets your terminal's native mouse-drag select only claude's content. Press `Ctrl+A x` again to restore. |
 | `[` | Enter scrollback mode on focused session |
 | `a` | Send a literal `Ctrl+A` to the focused session |
 | `?` | Help overlay |
