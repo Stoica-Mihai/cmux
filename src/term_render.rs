@@ -214,7 +214,10 @@ impl<'a> Widget for TermWidget<'a> {
                 .map(|s| s.contains(row as u16, col as u16))
                 .unwrap_or(false);
             if in_selection {
-                std::mem::swap(&mut fg, &mut bg);
+                bg = RColor::Rgb(0x58, 0x5b, 0x70);
+                if matches!(fg, RColor::Reset) {
+                    fg = RColor::Rgb(0xcd, 0xd6, 0xf4);
+                }
             }
 
             let style = Style::default().fg(fg).bg(bg).add_modifier(mods);

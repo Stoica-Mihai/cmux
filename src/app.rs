@@ -168,6 +168,7 @@ pub struct App {
     pub needs_redraw: bool,
     pub persist_dirty: bool,
     pub last_tile_area: Option<Rect>,
+    pub render_tick: u64,
 }
 
 impl App {
@@ -180,12 +181,13 @@ impl App {
             default_cwd,
             term_size,
             should_quit: false,
-            status: "Ctrl+A then: n=new  l=load  ↓=next  ↑=prev  1-9=jump  r=rename  d=detach  z=sidebar  q=quit".to_string(),
+            status: String::new(),
             prefix_pending: false,
             show_sidebar: true,
             needs_redraw: true,
             persist_dirty: false,
             last_tile_area: None,
+            render_tick: 0,
         }
     }
 

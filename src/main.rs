@@ -3,6 +3,7 @@ mod keys;
 mod persist;
 mod session;
 mod term_render;
+mod theme;
 mod transcripts;
 mod ui;
 #[macro_use]
@@ -85,6 +86,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
         let elapsed = now.saturating_sub(last_draw_ms);
         if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
+            app.render_tick = app.render_tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
             for (idx, rows, cols) in tile_sizes.drain(..) {
                 if let Some(s) = app.sessions.get_mut(idx) {

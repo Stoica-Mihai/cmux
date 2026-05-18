@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cmux — premium-feel mockup</title>
+<style>
+  :root {
+    /* catppuccin-mocha inspired */
+    --bg:        #1e1e2e;
+    --bg-alt:    #181825;
+    --bg-active: #313244;
+    --fg:        #cdd6f4;
+    --fg-dim:    #7f849c;
+    --fg-muted:  #9ca0b0;
+    --border-idle:  #45475a;
+    --border-focus: #f9e2af;
+    --border-dead:  #f38ba8;
+    --green:   #a6e3a1;
+    --cyan:    #89dceb;
+    --yellow:  #f9e2af;
+    --peach:   #fab387;
+    --red:     #f38ba8;
+    --magenta: #cba6f7;
+    --blue:    #89b4fa;
+    --rosewater: #f5e0dc;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0a0a0f;
+    color: var(--fg);
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.35;
+  }
+
+  .stage {
+    width: max-content;
+    margin: 32px auto;
+    padding: 16px;
+    background: var(--bg);
+    border-radius: 8px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+  }
+
+  .term {
+    display: grid;
+    grid-template-rows: auto auto 1fr auto auto;
+    grid-template-columns: 30ch 1fr;
+    gap: 0;
+    background: var(--bg);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .titlebar {
+    grid-column: 1 / -1;
+    padding: 4px 12px;
+    color: var(--fg-dim);
+    border-bottom: 1px solid var(--border-idle);
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 13px;
+  }
+  .brand { color: var(--magenta); font-weight: 600; letter-spacing: 0.5px; }
+  .brand-dot { color: var(--peach); }
+  .crumb-sep { color: var(--fg-dim); }
+  .crumb-key { color: var(--fg-muted); }
+  .crumb-val { color: var(--fg); }
+  .titlebar .right { margin-left: auto; display: flex; gap: 12px; }
+  .clock { color: var(--cyan); }
+
+  .sidebar {
+    border-right: 1px solid var(--border-idle);
+    padding: 6px 0 6px 0;
+  }
+  .sidebar .header {
+    color: var(--green);
+    padding: 0 12px 6px 12px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    border-bottom: 1px solid var(--border-idle);
+  }
+  .session {
+    padding: 8px 12px;
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    gap: 8px;
+    align-items: baseline;
+    border-left: 2px solid transparent;
+    transition: background 80ms ease;
+  }
+  .session.focused {
+    background: var(--bg-active);
+    border-left-color: var(--border-focus);
+  }
+  .session .badge { width: 1ch; }
+  .session .badge.busy   { color: var(--green); }
+  .session .badge.idle   { color: var(--cyan); }
+  .session .badge.warn   { color: var(--red); }
+  .session .badge.dorm   { color: var(--fg-dim); }
+  .session .badge.dead   { color: var(--red); }
+  .session .num { color: var(--fg-muted); }
+  .session .num strong { color: var(--yellow); }
+  .session .label { color: var(--fg); font-weight: 600; }
+  .session .label.dim { color: var(--fg-dim); }
+  .session .cwd { grid-column: 1 / -1; color: var(--fg-dim); font-size: 12px; padding-left: 24px; }
+  .session .meta { grid-column: 1 / -1; padding-left: 24px; font-size: 12px; color: var(--fg-muted); display: flex; gap: 10px; }
+  .session .meta .tok { color: var(--peach); }
+  .session .meta .age { color: var(--cyan); }
+  .session .meta .ctx { color: var(--magenta); }
+
+  /* spinner */
+  .spinner {
+    display: inline-block;
+    color: var(--green);
+    animation: spin 1.2s steps(10) infinite;
+  }
+  @keyframes spin {
+    0%   { content: "⠋"; }
+    10%  { content: "⠙"; }
+    20%  { content: "⠹"; }
+    30%  { content: "⠸"; }
+    40%  { content: "⠼"; }
+    50%  { content: "⠴"; }
+    60%  { content: "⠦"; }
+    70%  { content: "⠧"; }
+    80%  { content: "⠇"; }
+    90%  { content: "⠏"; }
+    100% { content: "⠋"; }
+  }
+  .spinner::before {
+    content: "⠋";
+    animation: spin-content 1.2s steps(10) infinite;
+  }
+  @keyframes spin-content {
+    0%   { content: "⠋"; }
+    10%  { content: "⠙"; }
+    20%  { content: "⠹"; }
+    30%  { content: "⠸"; }
+    40%  { content: "⠼"; }
+    50%  { content: "⠴"; }
+    60%  { content: "⠦"; }
+    70%  { content: "⠧"; }
+    80%  { content: "⠇"; }
+    90%  { content: "⠏"; }
+  }
+
+  .tile {
+    margin: 8px 8px 0 8px;
+    border: 1px solid var(--border-focus);
+    border-radius: 6px;
+    padding: 8px 12px;
+    background: var(--bg);
+    position: relative;
+  }
+  .tile-title {
+    position: absolute;
+    top: -10px;
+    left: 12px;
+    background: var(--bg);
+    padding: 0 8px;
+    color: var(--yellow);
+    font-weight: 600;
+  }
+  .tile-title .focus-dot { color: var(--green); }
+
+  .tile-body {
+    color: var(--fg);
+    white-space: pre-wrap;
+    line-height: 1.4;
+  }
+  .greet {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 10px 4px;
+    border: 1px solid var(--peach);
+    border-radius: 4px;
+    background: #1a1525;
+    margin: 8px 0 12px 0;
+  }
+  .greet .col-l { text-align: center; }
+  .greet .col-l .glyph { color: var(--peach); font-size: 32px; line-height: 1; }
+  .greet .col-l .meta { color: var(--fg); margin-top: 6px; }
+  .greet .col-r .h { color: var(--red); font-weight: 700; }
+  .greet .col-r .item { color: var(--fg); }
+  .greet .col-r .item.dim { color: var(--fg-dim); }
+
+  .input-line {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-idle);
+    color: var(--fg-dim);
+  }
+  .input-line .prompt { color: var(--green); }
+  .input-line .text { color: var(--fg); }
+
+  .reply, .churn { padding: 4px 8px; }
+  .reply .b { color: var(--green); }
+  .churn { color: var(--fg-dim); }
+  .churn .star { color: var(--peach); }
+
+  .cursor {
+    display: inline-block;
+    background: var(--fg);
+    color: var(--bg);
+    width: 1ch;
+    animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .footer {
+    grid-column: 1 / -1;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border-idle);
+    color: var(--fg-muted);
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 13px;
+  }
+  .mode-chip {
+    background: var(--green);
+    color: #0a0a0f;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .footer .sep { color: var(--fg-dim); }
+  .footer .right { margin-left: auto; display: flex; gap: 12px; color: var(--fg-dim); }
+  .footer .key { color: var(--cyan); }
+  .footer .key-desc { color: var(--fg-muted); }
+  .footer kbd {
+    background: var(--bg-active);
+    color: var(--fg);
+    padding: 0 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border-idle);
+    font-family: inherit;
+    font-size: 12px;
+  }
+
+  /* claude status pill row */
+  .claude-status-row {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+  }
+  .pill.brand   { background: #1b3a4b; color: var(--cyan); }
+  .pill.branch  { background: #1c3b2c; color: var(--green); }
+  .pill.cwd     { background: #2a2438; color: var(--magenta); }
+  .pill.ctx     { background: #3a2a4b; color: var(--magenta); }
+  .pill.tok     { background: #3a2e1b; color: var(--peach); }
+
+  .footnote {
+    color: var(--fg-dim);
+    font-size: 12px;
+    padding: 4px 12px 0 12px;
+  }
+
+  .annot {
+    margin: 0 auto 0 auto;
+    width: max-content;
+    color: var(--fg-muted);
+    font-size: 12px;
+    padding: 6px 0;
+    text-align: center;
+    max-width: 900px;
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="annot">cmux — premium-feel mockup • catppuccin-mocha palette • rounded borders • animated spinner • title bar • status pills</div>
+
+    <div class="term">
+      <!-- TITLE BAR -->
+      <div class="titlebar">
+        <span class="brand">◆ cmux</span>
+        <span class="crumb-sep">·</span>
+        <span class="crumb-key">sessions</span>
+        <span class="crumb-val">3</span>
+        <span class="crumb-sep">·</span>
+        <span class="crumb-key">focus</span>
+        <span class="crumb-val">[1] examples</span>
+        <span class="right">
+          <span class="crumb-key">cpu</span><span class="crumb-val">12%</span>
+          <span class="crumb-key">mem</span><span class="crumb-val">2.1GB</span>
+          <span class="clock">14:37</span>
+        </span>
+      </div>
+
+      <!-- SIDEBAR -->
+      <div class="sidebar">
+        <div class="header">▍ sessions · 3</div>
+
+        <div class="session focused">
+          <span class="badge busy"><span class="spinner"></span></span>
+          <span class="num">[<strong>1</strong>]</span>
+          <span class="label">examples</span>
+          <span class="cwd">~/Documents/git/cmux/examples</span>
+          <span class="meta">
+            <span class="age">⏱ 4s</span>
+            <span class="tok">▤ 2.1k tok</span>
+            <span class="ctx">◐ ctx 4%</span>
+          </span>
+        </div>
+
+        <div class="session">
+          <span class="badge idle">○</span>
+          <span class="num">[<strong>2</strong>]</span>
+          <span class="label">cmux</span>
+          <span class="cwd">~/Documents/git/cmux</span>
+          <span class="meta">
+            <span class="age">⏱ 12m</span>
+            <span class="tok">▤ 18.4k</span>
+            <span class="ctx">◐ ctx 22%</span>
+          </span>
+        </div>
+
+        <div class="session">
+          <span class="badge warn">⚠</span>
+          <span class="num">[<strong>3</strong>]</span>
+          <span class="label">docs</span>
+          <span class="cwd">~/Documents/git/docs</span>
+          <span class="meta">
+            <span class="age">⏱ 31s</span>
+            <span class="tok">▤ 9.0k</span>
+            <span class="ctx">◐ ctx 14%</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- MAIN TILE -->
+      <div class="tile" style="margin: 8px 12px;">
+        <div class="tile-title"><span class="focus-dot">●</span> [1] examples <span style="color:var(--fg-dim)">· ~/Documents/git/cmux/examples</span></div>
+
+        <div class="greet">
+          <div class="col-l">
+            <div class="glyph">▱▱▱</div>
+            <div class="meta">Opus 4.7 (1M context) · Claude Max</div>
+            <div class="meta dim">racotiad@gmail.com · ~/Documents/git/cmux/examples</div>
+          </div>
+          <div class="col-r">
+            <div class="h">What's new</div>
+            <div class="item">Added new claude agents</div>
+            <div class="item">Fast mode now uses Opus 4.7</div>
+            <div class="item">Plugins with a root-level…</div>
+            <div class="item dim">/release-notes for more</div>
+          </div>
+        </div>
+
+        <div class="input-line"><span class="prompt">›</span> <span class="text">hello</span></div>
+        <div class="reply"><span class="b">●</span> Hello. Ready for task.</div>
+        <div class="churn"><span class="star">∗</span> Baked for 5s</div>
+        <div class="input-line"><span class="prompt">›</span> <span class="cursor">&nbsp;</span></div>
+
+        <div class="claude-status-row">
+          <span class="pill brand">◆ Opus 4.7 (1M context) · xhigh</span>
+          <span class="pill brand">5h:14% · 7d:81%</span>
+          <span class="pill ctx">◐ ctx 4%</span>
+          <span class="pill brand">⊕ xhigh · /effort</span>
+          <span class="pill branch">⎇ main ✓</span>
+          <span class="pill cwd">~/Documents/git/cmux/examples</span>
+          <span class="pill tok">⏱ &lt;1m</span>
+        </div>
+        <div class="footnote">↳↳ accept edits on (shift+tab to cycle) · 28 skill descriptions dropped · <span style="color:var(--cyan)">/doctor</span> for details</div>
+      </div>
+
+      <!-- FOOTER -->
+      <div class="footer">
+        <span class="mode-chip">DASHBOARD</span>
+        <span><kbd>Ctrl+A</kbd> then</span>
+        <span class="key">n</span><span class="key-desc">new</span>
+        <span class="sep">·</span>
+        <span class="key">l</span><span class="key-desc">load</span>
+        <span class="sep">·</span>
+        <span class="key">↓↑</span><span class="key-desc">cycle</span>
+        <span class="sep">·</span>
+        <span class="key">1-9</span><span class="key-desc">jump</span>
+        <span class="sep">·</span>
+        <span class="key">r</span><span class="key-desc">rename</span>
+        <span class="sep">·</span>
+        <span class="key">d</span><span class="key-desc">detach</span>
+        <span class="sep">·</span>
+        <span class="key">z</span><span class="key-desc">sidebar</span>
+        <span class="sep">·</span>
+        <span class="key">q</span><span class="key-desc">quit</span>
+        <span class="right">
+          <span>drag to copy · OSC 52</span>
+          <span>·</span>
+          <span>v0.1.0</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- ANNOTATION LEGEND -->
+    <div class="annot" style="text-align:left; padding:20px 0 0 0; max-width:900px;">
+      <h3 style="color:var(--peach); margin:0 0 8px 0;">What changed vs current</h3>
+      <ul style="color:var(--fg-muted); line-height:1.7; padding-left:20px;">
+        <li><strong style="color:var(--yellow)">Palette</strong> — replace raw ANSI named colors (Green/Yellow/Red/Cyan/Magenta) with catppuccin-mocha RGB. Borders, badges, footer chip all retuned. Falls back gracefully on truecolor terminals; 256-color terminals get nearest match.</li>
+        <li><strong style="color:var(--yellow)">Rounded borders</strong> — every popup, sidebar, and tile uses <code style="color:var(--cyan)">BorderType::Rounded</code> (<code>╭ ╮ ╰ ╯</code> instead of <code>┌ ┐ └ ┘</code>).</li>
+        <li><strong style="color:var(--yellow)">Title bar</strong> — new top strip: <code style="color:var(--magenta)">◆ cmux</code> · sessions count · focus · cpu/mem (optional) · clock. Anchors identity at top.</li>
+        <li><strong style="color:var(--yellow)">Animated spinner</strong> — busy sessions' badge cycles braille frames <code style="color:var(--cyan)">⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏</code> at ~4fps (matches the existing 250ms heartbeat). Idle / dormant / dead keep static glyphs.</li>
+        <li><strong style="color:var(--yellow)">Session sidebar enrichment</strong> — adds <code style="color:var(--cyan)">⏱ age</code>, <code style="color:var(--peach)">▤ tokens</code>, <code style="color:var(--magenta)">◐ ctx%</code> from the claude status JSON we already parse. Two-line per session card.</li>
+        <li><strong style="color:var(--yellow)">Mode chip</strong> — solid background block with black text. Higher contrast than current dark-gray fill. Identical content, more presence.</li>
+        <li><strong style="color:var(--yellow)">Footer</strong> — keys color-keyed: <code style="color:var(--cyan)">cyan</code> = chord letter, <code style="color:var(--fg-muted)">muted</code> = description. Right-aligned: copy hint + version. <code>kbd</code> styling for modifier names.</li>
+        <li><strong style="color:var(--yellow)">Subtle backgrounds</strong> — focused session gets <code>bg-active</code> fill in sidebar; section dividers use 1-pixel border, not character runs.</li>
+        <li><strong style="color:var(--yellow)">Tile title overlay</strong> — title floats on the border (like ratatui already does); kept the focus dot in green.</li>
+        <li style="color:var(--fg-dim)"><em>Not in this pass: empty-state ascii art, popup logos, syntax-highlighted preview pane.</em></li>
+      </ul>
+
+      <h3 style="color:var(--peach); margin:20px 0 8px 0;">Things to adjust</h3>
+      <ul style="color:var(--fg-muted); line-height:1.7; padding-left:20px;">
+        <li>Palette: catppuccin-mocha or pick another (gruvbox, tokyonight, rose-pine, nord, dracula).</li>
+        <li>Title bar contents — strip cpu/mem? add per-session token total? add cmux version?</li>
+        <li>Sidebar meta row — which fields matter most (age / tokens / ctx% / cost)?</li>
+        <li>Spinner glyph set — braille (shown), bouncing dot <code style="color:var(--cyan)">⡀ ⠄ ⠂ ⠁</code>, classic <code style="color:var(--cyan)">| / - \\</code>, or none.</li>
+        <li>Rounded vs Thick (<code>┏ ┓ ┗ ┛</code>) vs Double (<code>╔ ╗ ╚ ╝</code>) borders.</li>
+        <li>Mode chip — solid block (shown) vs outlined vs underline-only.</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>
