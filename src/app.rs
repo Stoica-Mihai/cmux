@@ -169,6 +169,13 @@ pub struct App {
     pub persist_dirty: bool,
     pub last_tile_area: Option<Rect>,
     pub render_tick: u64,
+    pub toast: Option<Toast>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub text: String,
+    pub expires_at_ms: u64,
 }
 
 impl App {
@@ -188,6 +195,7 @@ impl App {
             persist_dirty: false,
             last_tile_area: None,
             render_tick: 0,
+            toast: None,
         }
     }
 

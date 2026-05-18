@@ -2,13 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>cmux — premium-feel mockup</title>
+<title>cmux — premium-feel mockup (round 2)</title>
 <style>
   :root {
-    /* catppuccin-mocha inspired */
+    /* catppuccin-mocha */
     --bg:        #1e1e2e;
     --bg-alt:    #181825;
     --bg-active: #313244;
+    --surface2:  #585b70;
     --fg:        #cdd6f4;
     --fg-dim:    #7f849c;
     --fg-muted:  #9ca0b0;
@@ -22,7 +23,6 @@
     --red:     #f38ba8;
     --magenta: #cba6f7;
     --blue:    #89b4fa;
-    --rosewater: #f5e0dc;
   }
 
   html, body {
@@ -30,14 +30,35 @@
     padding: 0;
     background: #0a0a0f;
     color: var(--fg);
-    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace;
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", monospace;
     font-size: 14px;
     line-height: 1.35;
   }
 
+  h2.section {
+    color: var(--peach);
+    margin: 32px auto 8px auto;
+    max-width: 900px;
+    padding-left: 12px;
+    border-left: 3px solid var(--peach);
+  }
+  h2.section .tag {
+    color: var(--fg-dim);
+    font-weight: 400;
+    font-size: 13px;
+    margin-left: 8px;
+  }
+  .caption {
+    color: var(--fg-muted);
+    font-size: 13px;
+    margin: 0 auto 16px auto;
+    max-width: 900px;
+    padding-left: 12px;
+  }
+
   .stage {
     width: max-content;
-    margin: 32px auto;
+    margin: 16px auto;
     padding: 16px;
     background: var(--bg);
     border-radius: 8px;
@@ -46,14 +67,15 @@
 
   .term {
     display: grid;
-    grid-template-rows: auto auto 1fr auto auto;
+    grid-template-rows: auto 1fr auto;
     grid-template-columns: 30ch 1fr;
-    gap: 0;
     background: var(--bg);
     border-radius: 6px;
     overflow: hidden;
+    position: relative;
   }
 
+  /* ===== TITLE BAR ===== */
   .titlebar {
     grid-column: 1 / -1;
     padding: 4px 12px;
@@ -64,14 +86,23 @@
     align-items: center;
     font-size: 13px;
   }
-  .brand { color: var(--magenta); font-weight: 600; letter-spacing: 0.5px; }
-  .brand-dot { color: var(--peach); }
+  .brand {
+    color: var(--magenta);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .brand.dim {
+    color: var(--fg-dim);  /* H: dim when not on Dashboard */
+  }
   .crumb-sep { color: var(--fg-dim); }
   .crumb-key { color: var(--fg-muted); }
   .crumb-val { color: var(--fg); }
-  .titlebar .right { margin-left: auto; display: flex; gap: 12px; }
-  .clock { color: var(--cyan); }
+  .titlebar .right { margin-left: auto; display: flex; gap: 14px; }
+  .clock { color: var(--cyan); }  /* E */
+  .position { color: var(--fg-muted); }  /* L */
+  .position strong { color: var(--yellow); }
 
+  /* ===== SIDEBAR ===== */
   .sidebar {
     border-right: 1px solid var(--border-idle);
     padding: 6px 0 6px 0;
@@ -87,51 +118,32 @@
   .session {
     padding: 8px 12px;
     display: grid;
-    grid-template-columns: auto auto 1fr;
-    gap: 8px;
+    grid-template-columns: auto auto auto auto 1fr;
+    column-gap: 6px;
     align-items: baseline;
     border-left: 2px solid transparent;
-    transition: background 80ms ease;
+    background: transparent;
   }
   .session.focused {
     background: var(--bg-active);
     border-left-color: var(--border-focus);
   }
-  .session .badge { width: 1ch; }
-  .session .badge.busy   { color: var(--green); }
-  .session .badge.idle   { color: var(--cyan); }
-  .session .badge.warn   { color: var(--red); }
-  .session .badge.dorm   { color: var(--fg-dim); }
-  .session .badge.dead   { color: var(--red); }
+  .session .badge { color: var(--green); }
+  .session .badge.idle  { color: var(--cyan); }
+  .session .badge.warn  { color: var(--red); }
+  .session .badge.dorm  { color: var(--fg-dim); }
+  .session .badge.dead  { color: var(--red); }
+  .session .pend-dot { color: var(--red); }  /* C: permission-pending red dot */
   .session .num { color: var(--fg-muted); }
-  .session .num strong { color: var(--yellow); }
+  .session .resume { color: var(--cyan); }
+  .session .danger { color: var(--red); }
   .session .label { color: var(--fg); font-weight: 600; }
-  .session .label.dim { color: var(--fg-dim); }
-  .session .cwd { grid-column: 1 / -1; color: var(--fg-dim); font-size: 12px; padding-left: 24px; }
-  .session .meta { grid-column: 1 / -1; padding-left: 24px; font-size: 12px; color: var(--fg-muted); display: flex; gap: 10px; }
-  .session .meta .tok { color: var(--peach); }
-  .session .meta .age { color: var(--cyan); }
-  .session .meta .ctx { color: var(--magenta); }
+  .session.focused .label { color: var(--border-focus); }
+  .session .cwd { grid-column: 1 / -1; color: var(--fg-dim); font-size: 12px; padding-left: 18px; }
+  .session .cwd .seg-fade { color: var(--fg-dim); opacity: 0.55; }  /* K: middle path fade */
+  .session .meta { grid-column: 1 / -1; padding-left: 18px; font-size: 12px; color: var(--fg-muted); }
+  .session .age { color: var(--cyan); }
 
-  /* spinner */
-  .spinner {
-    display: inline-block;
-    color: var(--green);
-    animation: spin 1.2s steps(10) infinite;
-  }
-  @keyframes spin {
-    0%   { content: "⠋"; }
-    10%  { content: "⠙"; }
-    20%  { content: "⠹"; }
-    30%  { content: "⠸"; }
-    40%  { content: "⠼"; }
-    50%  { content: "⠴"; }
-    60%  { content: "⠦"; }
-    70%  { content: "⠧"; }
-    80%  { content: "⠇"; }
-    90%  { content: "⠏"; }
-    100% { content: "⠋"; }
-  }
   .spinner::before {
     content: "⠋";
     animation: spin-content 1.2s steps(10) infinite;
@@ -149,11 +161,12 @@
     90%  { content: "⠏"; }
   }
 
+  /* ===== TILE ===== */
   .tile {
-    margin: 8px 8px 0 8px;
+    margin: 8px 12px;
     border: 1px solid var(--border-focus);
     border-radius: 6px;
-    padding: 8px 12px;
+    padding: 12px 16px;   /* B: extra horizontal breathing room */
     background: var(--bg);
     position: relative;
   }
@@ -163,16 +176,10 @@
     left: 12px;
     background: var(--bg);
     padding: 0 8px;
-    color: var(--yellow);
+    color: var(--border-focus);
     font-weight: 600;
   }
-  .tile-title .focus-dot { color: var(--green); }
 
-  .tile-body {
-    color: var(--fg);
-    white-space: pre-wrap;
-    line-height: 1.4;
-  }
   .greet {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -181,7 +188,7 @@
     border: 1px solid var(--peach);
     border-radius: 4px;
     background: #1a1525;
-    margin: 8px 0 12px 0;
+    margin: 0 0 12px 0;
   }
   .greet .col-l { text-align: center; }
   .greet .col-l .glyph { color: var(--peach); font-size: 32px; line-height: 1; }
@@ -197,7 +204,6 @@
   }
   .input-line .prompt { color: var(--green); }
   .input-line .text { color: var(--fg); }
-
   .reply, .churn { padding: 4px 8px; }
   .reply .b { color: var(--green); }
   .churn { color: var(--fg-dim); }
@@ -210,230 +216,430 @@
     width: 1ch;
     animation: blink 1s steps(2) infinite;
   }
+  /* J: cursor color reflects busy/idle state */
+  .cursor.busy { background: var(--green); }
+  .cursor.idle { background: var(--cyan); }
   @keyframes blink { 50% { opacity: 0; } }
 
+  /* A: selection-feedback toast */
+  .toast {
+    position: absolute;
+    right: 18px;
+    bottom: 18px;
+    background: var(--bg-active);
+    color: var(--green);
+    padding: 4px 10px;
+    border-radius: 16px;
+    border: 1px solid var(--green);
+    font-size: 12px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+    animation: fade 1.4s ease-out forwards;
+  }
+  @keyframes fade {
+    0% { opacity: 0; transform: translateY(4px); }
+    20% { opacity: 1; transform: translateY(0); }
+    80% { opacity: 1; }
+    100% { opacity: 0; transform: translateY(-4px); }
+  }
+
+  /* ===== FOOTER ===== */
   .footer {
     grid-column: 1 / -1;
     padding: 6px 12px;
     border-top: 1px solid var(--border-idle);
     color: var(--fg-muted);
     display: flex;
-    gap: 16px;
+    gap: 10px;
     align-items: center;
     font-size: 13px;
   }
-  .mode-chip {
-    background: var(--green);
-    color: #0a0a0f;
-    padding: 1px 8px;
-    border-radius: 3px;
+  .chip {
+    display: inline-block;
+    padding: 1px 10px;
+    border-radius: 999px;
     font-weight: 700;
     letter-spacing: 0.5px;
-  }
-  .footer .sep { color: var(--fg-dim); }
-  .footer .right { margin-left: auto; display: flex; gap: 12px; color: var(--fg-dim); }
-  .footer .key { color: var(--cyan); }
-  .footer .key-desc { color: var(--fg-muted); }
-  .footer kbd {
-    background: var(--bg-active);
-    color: var(--fg);
-    padding: 0 6px;
-    border-radius: 3px;
-    border: 1px solid var(--border-idle);
-    font-family: inherit;
+    color: #0a0a0f;
     font-size: 12px;
   }
-
-  /* claude status pill row */
-  .claude-status-row {
-    margin-top: 8px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: center;
-  }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+  .chip.green { background: var(--green); }
+  .chip.cyan  { background: var(--cyan); }
+  .chip.yellow{ background: var(--yellow); }
+  .chip.magenta{ background: var(--magenta); }
+  .chip.red   { background: var(--red); }
+  .chip.peach { background: var(--peach); }
+  .kbd {
+    display: inline-block;
     padding: 1px 8px;
     border-radius: 999px;
+    background: var(--bg-active);
+    color: var(--fg);
+    font-weight: 600;
     font-size: 12px;
+    border: 1px solid var(--border-idle);
   }
-  .pill.brand   { background: #1b3a4b; color: var(--cyan); }
-  .pill.branch  { background: #1c3b2c; color: var(--green); }
-  .pill.cwd     { background: #2a2438; color: var(--magenta); }
-  .pill.ctx     { background: #3a2a4b; color: var(--magenta); }
-  .pill.tok     { background: #3a2e1b; color: var(--peach); }
+  .footer .sep { color: var(--fg-dim); }
+  .footer .key { color: var(--cyan); }
+  .footer .key-desc { color: var(--fg-muted); }
 
-  .footnote {
-    color: var(--fg-dim);
-    font-size: 12px;
-    padding: 4px 12px 0 12px;
-  }
-
-  .annot {
-    margin: 0 auto 0 auto;
+  /* ===== CONFIRM POPUP (G) ===== */
+  .popup-stage {
     width: max-content;
+    margin: 16px auto;
+    padding: 12px;
+    background: var(--bg);
+    border-radius: 6px;
+  }
+  .confirm {
+    width: 460px;
+    border: 1px solid var(--red);
+    border-radius: 6px;
+    padding: 14px 18px;
+    background: var(--bg);
+  }
+  .confirm .title {
+    color: var(--red);
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .confirm .body { color: var(--fg); margin-bottom: 14px; }
+  .confirm .actions { display: flex; gap: 10px; }
+  .action-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 12px;
+    color: #0a0a0f;
+  }
+  .action-chip.confirm { background: var(--green); }
+  .action-chip.cancel { background: var(--surface2); color: var(--fg); }
+  .action-chip .key {
+    background: rgba(0,0,0,0.25);
+    color: inherit;
+    padding: 0 6px;
+    border-radius: 4px;
+  }
+
+  /* ===== HELP POPUP (D) ===== */
+  .help {
+    width: 720px;
+    border: 1px solid var(--yellow);
+    border-radius: 6px;
+    padding: 18px 22px;
+    background: var(--bg);
+  }
+  .help .title { color: var(--yellow); font-weight: 700; margin-bottom: 12px; }
+  .help .group-h { color: var(--yellow); font-weight: 700; margin: 14px 0 6px 0; }
+  .help .row { display: grid; grid-template-columns: 8ch 1fr; gap: 10px; align-items: center; padding: 3px 0; }
+  .help .chord {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 10px;
+    border-radius: 6px;
+    background: var(--bg-active);
+    color: var(--fg);
+    border: 1px solid var(--border-idle);
+    font-weight: 600;
+    font-size: 12px;
+    width: fit-content;
+  }
+  .help .chord.alt { background: rgba(249,226,175,0.1); border-color: var(--yellow); color: var(--yellow); }
+  .help .desc { color: var(--fg); }
+
+  /* ===== PICKER (F) ===== */
+  .picker {
+    width: 820px;
+    border: 1px solid var(--magenta);
+    border-radius: 6px;
+    background: var(--bg);
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .picker .head { grid-column: 1/-1; color: var(--magenta); font-weight: 700; }
+  .picker .filter { grid-column: 1/-1; color: var(--fg-dim); font-size: 12px; }
+  .picker .filter strong { color: var(--yellow); }
+  .picker .list { display: flex; flex-direction: column; }
+  .picker .row {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto auto;
+    gap: 6px;
+    align-items: baseline;
+    padding: 4px 6px;
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 12px;
+    border-left: 2px solid transparent;
+  }
+  .picker .row.selected {
+    background: var(--bg-active);
+    border-left-color: var(--magenta);
+  }
+  .picker .row .cwd { color: var(--fg); }
+  .picker .row .age { color: var(--cyan); }
+  .picker .row .size { color: var(--peach); }
+  .picker .row .id { color: var(--fg-dim); font-style: italic; }
+  .picker .preview {
+    background: var(--bg-alt);
+    border-radius: 4px;
+    padding: 8px;
     color: var(--fg-muted);
     font-size: 12px;
-    padding: 6px 0;
-    text-align: center;
-    max-width: 900px;
+    border: 1px dashed var(--border-idle);
   }
+  .picker .preview .user { color: var(--cyan); }
+  .picker .preview .asst { color: var(--green); }
 </style>
 </head>
 <body>
-  <div class="stage">
-    <div class="annot">cmux — premium-feel mockup • catppuccin-mocha palette • rounded borders • animated spinner • title bar • status pills</div>
 
-    <div class="term">
-      <!-- TITLE BAR -->
-      <div class="titlebar">
-        <span class="brand">◆ cmux</span>
-        <span class="crumb-sep">·</span>
-        <span class="crumb-key">sessions</span>
-        <span class="crumb-val">3</span>
-        <span class="crumb-sep">·</span>
-        <span class="crumb-key">focus</span>
-        <span class="crumb-val">[1] examples</span>
-        <span class="right">
-          <span class="crumb-key">cpu</span><span class="crumb-val">12%</span>
-          <span class="crumb-key">mem</span><span class="crumb-val">2.1GB</span>
-          <span class="clock">14:37</span>
-        </span>
+<h2 class="section">Dashboard — full premium pass <span class="tag">A · B · C · E · J · K · L</span></h2>
+<p class="caption">Title bar gets clock + position counter. Tile gets 1-col internal padding and a "copied ✓" toast after mouse-select. Sidebar entry shows a small red dot for permission-pending. Path fades middle segments. Cursor color tracks claude state.</p>
+
+<div class="stage">
+  <div class="term">
+    <!-- TITLE BAR -->
+    <div class="titlebar">
+      <span class="brand">◆ cmux</span>
+      <span class="crumb-sep">·</span>
+      <span class="position"><strong>1</strong>/3</span>  <!-- L: position counter -->
+      <span class="crumb-sep">·</span>
+      <span class="crumb-key">focus</span>
+      <span class="crumb-val">[1] examples</span>
+      <span class="right">
+        <span class="clock">14:37</span>  <!-- E: clock -->
+      </span>
+    </div>
+
+    <!-- SIDEBAR -->
+    <div class="sidebar">
+      <div class="header">▍ sessions · 3</div>
+
+      <div class="session focused">
+        <span class="badge"><span class="spinner"></span></span>
+        <span class="num">[<strong style="color:var(--border-focus)">1</strong>]</span>
+        <span class="resume"> </span>
+        <span class="danger"> </span>
+        <span class="label">examples</span>
+        <span class="cwd">~/Documents/<span class="seg-fade">…</span>/cmux/examples</span>  <!-- K: collapsed path -->
+        <span class="meta"><span class="age">⏱ 4s</span> · busy</span>
       </div>
 
-      <!-- SIDEBAR -->
-      <div class="sidebar">
-        <div class="header">▍ sessions · 3</div>
-
-        <div class="session focused">
-          <span class="badge busy"><span class="spinner"></span></span>
-          <span class="num">[<strong>1</strong>]</span>
-          <span class="label">examples</span>
-          <span class="cwd">~/Documents/git/cmux/examples</span>
-          <span class="meta">
-            <span class="age">⏱ 4s</span>
-            <span class="tok">▤ 2.1k tok</span>
-            <span class="ctx">◐ ctx 4%</span>
-          </span>
-        </div>
-
-        <div class="session">
-          <span class="badge idle">○</span>
-          <span class="num">[<strong>2</strong>]</span>
-          <span class="label">cmux</span>
-          <span class="cwd">~/Documents/git/cmux</span>
-          <span class="meta">
-            <span class="age">⏱ 12m</span>
-            <span class="tok">▤ 18.4k</span>
-            <span class="ctx">◐ ctx 22%</span>
-          </span>
-        </div>
-
-        <div class="session">
-          <span class="badge warn">⚠</span>
-          <span class="num">[<strong>3</strong>]</span>
-          <span class="label">docs</span>
-          <span class="cwd">~/Documents/git/docs</span>
-          <span class="meta">
-            <span class="age">⏱ 31s</span>
-            <span class="tok">▤ 9.0k</span>
-            <span class="ctx">◐ ctx 14%</span>
-          </span>
-        </div>
+      <div class="session">
+        <span class="badge idle">○</span>
+        <span class="num">[<strong>2</strong>]</span>
+        <span class="pend-dot">●</span>  <!-- C: permission-pending dot -->
+        <span class="danger"> </span>
+        <span class="label">cmux</span>
+        <span class="cwd">~/Documents/<span class="seg-fade">…</span>/cmux</span>
+        <span class="meta"><span class="age">⏱ 12m</span> · idle</span>
       </div>
 
-      <!-- MAIN TILE -->
-      <div class="tile" style="margin: 8px 12px;">
-        <div class="tile-title"><span class="focus-dot">●</span> [1] examples <span style="color:var(--fg-dim)">· ~/Documents/git/cmux/examples</span></div>
-
-        <div class="greet">
-          <div class="col-l">
-            <div class="glyph">▱▱▱</div>
-            <div class="meta">Opus 4.7 (1M context) · Claude Max</div>
-            <div class="meta dim">racotiad@gmail.com · ~/Documents/git/cmux/examples</div>
-          </div>
-          <div class="col-r">
-            <div class="h">What's new</div>
-            <div class="item">Added new claude agents</div>
-            <div class="item">Fast mode now uses Opus 4.7</div>
-            <div class="item">Plugins with a root-level…</div>
-            <div class="item dim">/release-notes for more</div>
-          </div>
-        </div>
-
-        <div class="input-line"><span class="prompt">›</span> <span class="text">hello</span></div>
-        <div class="reply"><span class="b">●</span> Hello. Ready for task.</div>
-        <div class="churn"><span class="star">∗</span> Baked for 5s</div>
-        <div class="input-line"><span class="prompt">›</span> <span class="cursor">&nbsp;</span></div>
-
-        <div class="claude-status-row">
-          <span class="pill brand">◆ Opus 4.7 (1M context) · xhigh</span>
-          <span class="pill brand">5h:14% · 7d:81%</span>
-          <span class="pill ctx">◐ ctx 4%</span>
-          <span class="pill brand">⊕ xhigh · /effort</span>
-          <span class="pill branch">⎇ main ✓</span>
-          <span class="pill cwd">~/Documents/git/cmux/examples</span>
-          <span class="pill tok">⏱ &lt;1m</span>
-        </div>
-        <div class="footnote">↳↳ accept edits on (shift+tab to cycle) · 28 skill descriptions dropped · <span style="color:var(--cyan)">/doctor</span> for details</div>
-      </div>
-
-      <!-- FOOTER -->
-      <div class="footer">
-        <span class="mode-chip">DASHBOARD</span>
-        <span><kbd>Ctrl+A</kbd> then</span>
-        <span class="key">n</span><span class="key-desc">new</span>
-        <span class="sep">·</span>
-        <span class="key">l</span><span class="key-desc">load</span>
-        <span class="sep">·</span>
-        <span class="key">↓↑</span><span class="key-desc">cycle</span>
-        <span class="sep">·</span>
-        <span class="key">1-9</span><span class="key-desc">jump</span>
-        <span class="sep">·</span>
-        <span class="key">r</span><span class="key-desc">rename</span>
-        <span class="sep">·</span>
-        <span class="key">d</span><span class="key-desc">detach</span>
-        <span class="sep">·</span>
-        <span class="key">z</span><span class="key-desc">sidebar</span>
-        <span class="sep">·</span>
-        <span class="key">q</span><span class="key-desc">quit</span>
-        <span class="right">
-          <span>drag to copy · OSC 52</span>
-          <span>·</span>
-          <span>v0.1.0</span>
-        </span>
+      <div class="session">
+        <span class="badge dorm">·</span>
+        <span class="num">[<strong>3</strong>]</span>
+        <span class="resume">↺</span>
+        <span class="danger"> </span>
+        <span class="label">docs</span>
+        <span class="cwd">~/Documents/<span class="seg-fade">…</span>/docs</span>
+        <span class="meta"><span class="age">⏱ 2h</span> · idle</span>
       </div>
     </div>
 
-    <!-- ANNOTATION LEGEND -->
-    <div class="annot" style="text-align:left; padding:20px 0 0 0; max-width:900px;">
-      <h3 style="color:var(--peach); margin:0 0 8px 0;">What changed vs current</h3>
-      <ul style="color:var(--fg-muted); line-height:1.7; padding-left:20px;">
-        <li><strong style="color:var(--yellow)">Palette</strong> — replace raw ANSI named colors (Green/Yellow/Red/Cyan/Magenta) with catppuccin-mocha RGB. Borders, badges, footer chip all retuned. Falls back gracefully on truecolor terminals; 256-color terminals get nearest match.</li>
-        <li><strong style="color:var(--yellow)">Rounded borders</strong> — every popup, sidebar, and tile uses <code style="color:var(--cyan)">BorderType::Rounded</code> (<code>╭ ╮ ╰ ╯</code> instead of <code>┌ ┐ └ ┘</code>).</li>
-        <li><strong style="color:var(--yellow)">Title bar</strong> — new top strip: <code style="color:var(--magenta)">◆ cmux</code> · sessions count · focus · cpu/mem (optional) · clock. Anchors identity at top.</li>
-        <li><strong style="color:var(--yellow)">Animated spinner</strong> — busy sessions' badge cycles braille frames <code style="color:var(--cyan)">⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏</code> at ~4fps (matches the existing 250ms heartbeat). Idle / dormant / dead keep static glyphs.</li>
-        <li><strong style="color:var(--yellow)">Session sidebar enrichment</strong> — adds <code style="color:var(--cyan)">⏱ age</code>, <code style="color:var(--peach)">▤ tokens</code>, <code style="color:var(--magenta)">◐ ctx%</code> from the claude status JSON we already parse. Two-line per session card.</li>
-        <li><strong style="color:var(--yellow)">Mode chip</strong> — solid background block with black text. Higher contrast than current dark-gray fill. Identical content, more presence.</li>
-        <li><strong style="color:var(--yellow)">Footer</strong> — keys color-keyed: <code style="color:var(--cyan)">cyan</code> = chord letter, <code style="color:var(--fg-muted)">muted</code> = description. Right-aligned: copy hint + version. <code>kbd</code> styling for modifier names.</li>
-        <li><strong style="color:var(--yellow)">Subtle backgrounds</strong> — focused session gets <code>bg-active</code> fill in sidebar; section dividers use 1-pixel border, not character runs.</li>
-        <li><strong style="color:var(--yellow)">Tile title overlay</strong> — title floats on the border (like ratatui already does); kept the focus dot in green.</li>
-        <li style="color:var(--fg-dim)"><em>Not in this pass: empty-state ascii art, popup logos, syntax-highlighted preview pane.</em></li>
-      </ul>
+    <!-- MAIN TILE -->
+    <div class="tile">
+      <div class="tile-title">[1] examples</div>
 
-      <h3 style="color:var(--peach); margin:20px 0 8px 0;">Things to adjust</h3>
-      <ul style="color:var(--fg-muted); line-height:1.7; padding-left:20px;">
-        <li>Palette: catppuccin-mocha or pick another (gruvbox, tokyonight, rose-pine, nord, dracula).</li>
-        <li>Title bar contents — strip cpu/mem? add per-session token total? add cmux version?</li>
-        <li>Sidebar meta row — which fields matter most (age / tokens / ctx% / cost)?</li>
-        <li>Spinner glyph set — braille (shown), bouncing dot <code style="color:var(--cyan)">⡀ ⠄ ⠂ ⠁</code>, classic <code style="color:var(--cyan)">| / - \\</code>, or none.</li>
-        <li>Rounded vs Thick (<code>┏ ┓ ┗ ┛</code>) vs Double (<code>╔ ╗ ╚ ╝</code>) borders.</li>
-        <li>Mode chip — solid block (shown) vs outlined vs underline-only.</li>
-      </ul>
+      <div class="greet">
+        <div class="col-l">
+          <div class="glyph">▱▱▱</div>
+          <div class="meta">Opus 4.7 (1M context) · Claude Max</div>
+          <div class="meta" style="color:var(--fg-dim)">racotiad@gmail.com · ~/Documents/git/cmux/examples</div>
+        </div>
+        <div class="col-r">
+          <div class="h">What's new</div>
+          <div class="item">Added new claude agents</div>
+          <div class="item">Fast mode now uses Opus 4.7</div>
+          <div class="item dim">/release-notes for more</div>
+        </div>
+      </div>
+
+      <div class="input-line"><span class="prompt">›</span> <span class="text">hello</span></div>
+      <div class="reply"><span class="b">●</span> Hi. What task?</div>
+      <div class="churn"><span class="star">∗</span> Cogitated for 1s</div>
+      <div class="input-line"><span class="prompt">›</span> <span class="cursor busy">&nbsp;</span></div>  <!-- J: busy cursor green -->
+
+      <div class="toast">copied ✓ 27 chars</div>  <!-- A: post-select toast -->
+    </div>
+
+    <!-- FOOTER -->
+    <div class="footer">
+      <span class="chip green">DASHBOARD</span>
+      <span class="kbd">Ctrl+A</span>
+      <span style="color:var(--fg-muted)">then</span>
+      <span class="key">n</span><span class="key-desc">new</span>
+      <span class="sep">·</span>
+      <span class="key">l</span><span class="key-desc">load</span>
+      <span class="sep">·</span>
+      <span class="key">↑↓</span><span class="key-desc">cycle</span>
+      <span class="sep">·</span>
+      <span class="key">1-9</span><span class="key-desc">jump</span>
+      <span class="sep">·</span>
+      <span class="key">r</span><span class="key-desc">rename</span>
+      <span class="sep">·</span>
+      <span class="key">d</span><span class="key-desc">detach</span>
+      <span class="sep">·</span>
+      <span class="key">q</span><span class="key-desc">quit</span>
     </div>
   </div>
+</div>
+
+<h2 class="section">Mode tinting <span class="tag">H · brand dims when off dashboard</span></h2>
+<p class="caption">When in Spawn/Picker/Rename, the title-bar brand goes muted gray and the focused-tile border carries the mode's accent color. Mode-aware visual feedback without footer-only signaling.</p>
+<div class="stage">
+  <div class="term">
+    <div class="titlebar">
+      <span class="brand dim">◆ cmux</span>
+      <span class="crumb-sep">·</span>
+      <span class="position"><strong>1</strong>/3</span>
+      <span class="crumb-sep">·</span>
+      <span class="crumb-key">focus</span>
+      <span class="crumb-val">[1] examples</span>
+      <span class="right">
+        <span class="clock">14:39</span>
+      </span>
+    </div>
+    <div class="sidebar">
+      <div class="header">▍ sessions · 3</div>
+      <div class="session"><span class="badge"><span class="spinner"></span></span><span class="num">[<strong>1</strong>]</span><span class="resume"> </span><span class="danger"> </span><span class="label">examples</span></div>
+    </div>
+    <div class="tile" style="border-color: var(--cyan)"><div class="tile-title" style="color: var(--cyan)">SPAWN — pick a folder</div>
+      <div style="padding-top:8px; color: var(--fg)">› ~/dev<br/>&nbsp;&nbsp;cmux<br/>▶ examples<br/>&nbsp;&nbsp;other</div>
+    </div>
+    <div class="footer">
+      <span class="chip cyan">SPAWN</span>
+      <span style="color:var(--fg-muted)">Enter pick · Esc cancel · Space danger · ↑↓ select · →/← descend/ascend</span>
+    </div>
+  </div>
+</div>
+
+<h2 class="section">Confirm-detach as action chips <span class="tag">G</span></h2>
+<p class="caption">Replace plain <code>[y]es / Enter · [n] / Esc</code> text with two chip-styled actions: green confirm, neutral cancel. The y/n key letters live inside each chip in dim contrast.</p>
+<div class="popup-stage">
+  <div class="confirm">
+    <div class="title">⚠  Detach session?</div>
+    <div class="body">Terminate session <strong style="color:var(--fg)">[1] examples</strong>? Running claude process will be killed.</div>
+    <div class="actions">
+      <span class="action-chip confirm"><span class="key">y</span>detach</span>
+      <span class="action-chip cancel"><span class="key">n</span>cancel</span>
+    </div>
+  </div>
+</div>
+
+<h2 class="section">Help popup with chord chips <span class="tag">D</span></h2>
+<p class="caption">Each chord rendered in a tiny rounded kbd-chip instead of bare letter. Two-column grid: chip · description.</p>
+<div class="popup-stage">
+  <div class="help">
+    <div class="title">⌘ cmux — cheat sheet</div>
+
+    <div class="group-h">Prefix chords  (after Ctrl+A)</div>
+    <div class="row"><span class="chord">n</span><span class="desc">spawn new claude in a folder</span></div>
+    <div class="row"><span class="chord">l</span><span class="desc">resume picker (past sessions)</span></div>
+    <div class="row"><span class="chord">r</span><span class="desc">rename focused session</span></div>
+    <div class="row"><span class="chord">d</span><span class="desc">detach focused (with confirm)</span></div>
+    <div class="row"><span class="chord">[</span><span class="desc">enter scrollback mode</span></div>
+    <div class="row"><span class="chord">m</span><span class="desc">enter reorder mode (move sessions)</span></div>
+    <div class="row"><span class="chord">↑ ↓</span><span class="desc">cycle focused session</span></div>
+    <div class="row"><span class="chord">1 .. 9</span><span class="desc">jump to session N</span></div>
+    <div class="row"><span class="chord">z</span><span class="desc">toggle sidebar</span></div>
+    <div class="row"><span class="chord">a</span><span class="desc">send literal Ctrl+A to focused claude</span></div>
+    <div class="row"><span class="chord alt">?</span><span class="desc">this help</span></div>
+    <div class="row"><span class="chord">q</span><span class="desc">quit (kills all sessions)</span></div>
+
+    <div class="group-h">Global</div>
+    <div class="row"><span class="chord">Ctrl+Q</span><span class="desc">hard quit from anywhere</span></div>
+
+    <div class="group-h">Mouse</div>
+    <div class="row"><span class="chord">drag</span><span class="desc">copy selection via OSC 52</span></div>
+    <div class="row"><span class="chord">⇧+drag</span><span class="desc">bypass cmux, outer terminal selection</span></div>
+  </div>
+</div>
+
+<h2 class="section">Resume picker — selected row matches sidebar style <span class="tag">F</span></h2>
+<p class="caption">Drop the current cyan-inverted highlight. Selected row gets <code>BG_ACTIVE</code> fill + magenta left strip (matching mode color), preview pane right-side.</p>
+<div class="popup-stage">
+  <div class="picker">
+    <div class="head">Resume past session (37 found)</div>
+    <div class="filter">filter: <strong>cmux</strong>    (3/37)</div>
+
+    <div class="list">
+      <div class="row">
+        <span class="cwd">~/Documents/git/cmux</span>
+        <span></span>
+        <span class="age">3m ago</span>
+        <span class="size">42KB</span>
+        <span class="id">9f3a2b…</span>
+      </div>
+      <div class="row selected">
+        <span class="cwd">~/Documents/git/cmux/examples</span>
+        <span></span>
+        <span class="age">12s ago</span>
+        <span class="size">1.2KB</span>
+        <span class="id">8c1d4e…</span>
+      </div>
+      <div class="row">
+        <span class="cwd">~/Documents/git/cmux-old</span>
+        <span></span>
+        <span class="age">2h ago</span>
+        <span class="size">88KB</span>
+        <span class="id">02ff91…</span>
+      </div>
+    </div>
+
+    <div class="preview">
+      <div><span class="user">▸ user</span></div>
+      <div>  hello, can you read the cargo.toml?</div>
+      <div style="margin-top:4px"><span class="asst">◂ assistant</span></div>
+      <div>  Sure. The package is named "cmux" v0.1.0…</div>
+      <div style="margin-top:6px; color:var(--fg-dim)">… (truncated)</div>
+    </div>
+  </div>
+</div>
+
+<h2 class="section">Permission-pending pulse <span class="tag">I · static can't show</span></h2>
+<p class="caption">Render-tick modulates border brightness: <code>BORDER_DEAD</code> alternates between <code>#f38ba8</code> and <code>#c9748d</code> on each redraw when <code>permission_pending</code>. Subtle but draws eyes to urgent session. (Animated in real terminal; this mockup just shows two stills.)</p>
+<div class="popup-stage" style="display:flex; gap:24px;">
+  <div style="border: 2px solid #f38ba8; border-radius:6px; padding:12px 16px; min-width:240px; background:var(--bg);">
+    <div style="color:var(--red); font-weight:600;">[3] docs  ⚠</div>
+    <div style="color:var(--fg)">awaiting approval</div>
+  </div>
+  <div style="border: 2px solid #c9748d; border-radius:6px; padding:12px 16px; min-width:240px; background:var(--bg);">
+    <div style="color:var(--red); font-weight:600; opacity:.7;">[3] docs  ⚠</div>
+    <div style="color:var(--fg); opacity:.7;">awaiting approval</div>
+  </div>
+</div>
+
+<h2 class="section">Picked set — implementation order</h2>
+<div class="caption" style="line-height:1.7">
+  <strong style="color:var(--yellow)">A</strong> — selection-feedback toast (bottom-right of tile, ~1s fade)<br/>
+  <strong style="color:var(--yellow)">B</strong> — tile inner padding (1 col left + 1 col right)<br/>
+  <strong style="color:var(--yellow)">C</strong> — permission-pending red dot in sidebar entry<br/>
+  <strong style="color:var(--yellow)">E</strong> — clock right-aligned in title bar (manual SystemTime fmt, no chrono dep)<br/>
+  <strong style="color:var(--yellow)">F</strong> — picker row uses BG_ACTIVE + magenta strip (drops cyan reverse-bar)<br/>
+  <strong style="color:var(--yellow)">G</strong> — confirm-detach renders y/n as action chips<br/>
+  <strong style="color:var(--yellow)">K</strong> — sidebar cwd collapses $HOME→~ and middle segments fade as …<br/>
+  <strong style="color:var(--yellow)">L</strong> — title bar shows "<strong>1</strong>/3" position counter<br/>
+  <em style="color:var(--fg-dim)">Optional / discuss:</em>
+  <strong style="color:var(--fg-muted)">D</strong> — help popup chord chips (nice, but help is rarely used)<br/>
+  <strong style="color:var(--fg-muted)">H</strong> — dim brand when off-dashboard (subtle)<br/>
+  <strong style="color:var(--fg-muted)">I</strong> — permission-pending border pulse (subtle motion)<br/>
+  <strong style="color:var(--fg-muted)">J</strong> — cursor color by claude state (subtle)<br/>
+</div>
+
 </body>
 </html>

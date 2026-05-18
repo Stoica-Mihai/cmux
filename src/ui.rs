@@ -42,31 +42,90 @@ pub fn draw(f: &mut Frame, app: &mut App, tile_sizes: &mut TileSizes) {
         Mode::Help => draw_help_popup(f, area),
         Mode::Dashboard | Mode::Scrollback(_) | Mode::Reorder => {}
     }
+
+    if let (Some(tile), Some(toast)) = (app.last_tile_area, &app.toast) {
+        draw_toast(f, tile, &toast.text);
+    }
+}
+
+fn draw_toast(f: &mut Frame, tile: Rect, text: &str) {
+    let label = format!(" {} ", text);
+    let w = label.chars().count() as u16 + 2;
+    let x = tile.x + tile.width.saturating_sub(w + 1);
+    let y = tile.y + tile.height.saturating_sub(2);
+    if x < tile.x || y < tile.y {
+        return;
+    }
+    let rect = Rect { x, y, width: w, height: 1 };
+    let spans = vec![
+        Span::styled("\u{E0B6}", Style::default().fg(theme::BG_ACTIVE)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme::ACCENT_GREEN)
+                .bg(theme::BG_ACTIVE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{E0B4}", Style::default().fg(theme::BG_ACTIVE)),
+    ];
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
+    let on_dashboard = matches!(app.mode, Mode::Dashboard);
+    let brand_color = if on_dashboard {
+        theme::ACCENT_MAGENTA
+    } else {
+        theme::FG_DIM
+    };
     let focus_label = app
         .sessions
         .get(app.focus)
         .map(|s| format!("[{}] {}", app.focus + 1, s.label))
         .unwrap_or_else(|| "—".to_string());
+    let pos = if app.sessions.is_empty() {
+        String::from("0/0")
+    } else {
+        format!("{}/{}", app.focus + 1, app.sessions.len())
+    };
     let dim = Style::default().fg(theme::FG_DIM);
     let value = Style::default().fg(theme::FG);
-    let line = Line::from(vec![
+    let mut left_spans = vec![
         Span::styled(
             " ◆ cmux ",
-            Style::default()
-                .fg(theme::ACCENT_MAGENTA)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(brand_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" · ", dim),
-        Span::styled("sessions ", dim),
-        Span::styled(format!("{}", app.sessions.len()), value),
+        Span::styled(
+            pos,
+            Style::default()
+                .fg(theme::ACCENT_YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  ·  ", dim),
         Span::styled("focus ", dim),
         Span::styled(focus_label, value),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+
+    let clock = current_clock_string();
+    let clock_chars = clock.chars().count() as u16;
+    let left_chars: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let mid_width = (area.width as usize)
+        .saturating_sub(left_chars)
+        .saturating_sub(clock_chars as usize)
+        .saturating_sub(1);
+    if mid_width > 0 {
+        left_spans.push(Span::raw(" ".repeat(mid_width)));
+    }
+    left_spans.push(Span::styled(clock, Style::default().fg(theme::ACCENT_CYAN)));
+    left_spans.push(Span::raw(" "));
+
+    f.render_widget(Paragraph::new(Line::from(left_spans)), area);
+}
+
+fn current_clock_string() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
@@ -98,44 +157,39 @@ fn open_popup(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str, color: Col
     inner
 }
 
-fn dangerous_line(active: bool) -> Line<'static> {
-    if active {
-        Line::from(Span::styled(
-            " [x] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::from(Span::styled(
-            " [ ] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Gray),
-        ))
-    }
-}
 
 fn draw_help_popup(f: &mut Frame, area: Rect) {
-    let w = area.width.saturating_sub(4).clamp(60, 76);
-    let h = area.height.saturating_sub(2).clamp(20, 28);
-    let inner = open_popup(f, area, w, h, " cmux — cheat sheet ", Color::Yellow);
+    let w = area.width.saturating_sub(4).clamp(64, 80);
+    let h = area.height.saturating_sub(2).clamp(22, 30);
+    let inner = open_popup(f, area, w, h, " ⌘ cmux — cheat sheet ", theme::ACCENT_YELLOW);
 
     let header = |s: &'static str| {
         Line::from(Span::styled(
             s.to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::ACCENT_YELLOW)
+                .add_modifier(Modifier::BOLD),
         ))
     };
     let row = |chord: &str, desc: &str| {
-        Line::from(vec![
-            Span::styled(
-                format!("  {:<14}", chord),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(desc.to_string(), Style::default().fg(Color::White)),
-        ])
+        let chord_chip = kbd_chip(chord);
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        spans.extend(chord_chip);
+        let chord_width: usize = chord.chars().count() + 4;
+        let pad = 12usize.saturating_sub(chord_width);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        spans.push(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(theme::FG),
+        ));
+        Line::from(spans)
     };
     let note = |s: &str| {
         Line::from(Span::styled(
             format!("  {}", s),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::FG_DIM),
         ))
     };
 
@@ -147,8 +201,8 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         row("d", "detach focused (with confirm)"),
         row("[", "enter scrollback mode"),
         row("m", "enter reorder mode (move sessions)"),
-        row("↑ / ↓", "cycle focused session"),
-        row("1 .. 9", "jump to session N"),
+        row("↑↓", "cycle focused session"),
+        row("1-9", "jump to session N"),
         row("z", "toggle sidebar"),
         row("a", "send literal Ctrl+A to focused claude"),
         row("?", "this help"),
@@ -158,21 +212,16 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         row("Ctrl+Q", "hard quit from anywhere"),
         Line::from(""),
         header(" Mouse"),
-        note("drag inside tile → copies selection via OSC 52"),
-        note("Shift+drag → bypass cmux, use outer terminal selection"),
+        row("drag", "copy selection via OSC 52"),
+        row("⇧+drag", "bypass cmux, outer terminal selection"),
         Line::from(""),
         header(" Sidebar badges"),
-        note("● green  busy (claude working)"),
+        note("⠋ green  busy (claude working)"),
         note("○ cyan   idle (claude waiting for input)"),
-        note("⚠ red    permission prompt waiting"),
+        note("● red    permission prompt waiting"),
         note("· gray   dormant"),
         note("✕ red    session exited"),
-        note("↺        resumed session"),
-        Line::from(""),
-        header(" Inside popups"),
-        note("Spawn   ↑↓ select  ·  → descend  ·  ← ascend  ·  Space dangerous  ·  Enter pick"),
-        note("Resume  ↑↓ select  ·  type to filter  ·  Tab dangerous  ·  Enter resume"),
-        note("Scroll  ↑↓ line  ·  PgUp/PgDn page  ·  g top  ·  G bottom  ·  q exit"),
+        note("↺ cyan   resumed session"),
         Line::from(""),
         note("press any key to close"),
     ];
@@ -180,9 +229,9 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
 }
 
 fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
-    let w = area.width.clamp(40, 60);
-    let h: u16 = 7;
-    let inner = open_popup(f, area, w, h, " Detach session? ", Color::Red);
+    let w = area.width.clamp(44, 56);
+    let h: u16 = 6;
+    let inner = open_popup(f, area, w, h, " ⚠ Detach session? ", theme::ACCENT_RED);
 
     let (pos, label) = app
         .sessions
@@ -193,18 +242,48 @@ fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
         .unwrap_or((0, "?".to_string()));
 
     let lines = vec![
-        Line::from(""),
         Line::from(Span::styled(
-            format!("  Terminate session [{}] '{}' ?", pos, label),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
+            format!("Terminate session [{}] '{}' ?", pos, label),
+            Style::default().fg(theme::FG),
+        ))
+        .alignment(ratatui::layout::Alignment::Center),
         Line::from(Span::styled(
-            "  [y]es / Enter to confirm   ·   [n] / Esc to cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
+            "Running claude process will be killed.",
+            Style::default().fg(theme::FG_DIM),
+        ))
+        .alignment(ratatui::layout::Alignment::Center),
+        Line::from(""),
+        Line::from({
+            let mut spans = action_chip("y", "detach", theme::ACCENT_GREEN);
+            spans.push(Span::raw("   "));
+            spans.extend(action_chip("n", "cancel", theme::FG_DIM));
+            spans
+        })
+        .alignment(ratatui::layout::Alignment::Center),
     ];
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn action_chip(key: &str, label: &str, color: Color) -> Vec<Span<'static>> {
+    let dark = Color::Rgb(0x0a, 0x0a, 0x0f);
+    vec![
+        Span::styled("\u{E0B6}", Style::default().fg(color)),
+        Span::styled(
+            format!(" {} ", key),
+            Style::default()
+                .fg(dark)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} ", label),
+            Style::default()
+                .fg(dark)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{E0B4}", Style::default().fg(color)),
+    ]
 }
 
 fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState) {
@@ -225,11 +304,11 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(1),  // filter
+            Constraint::Min(3),     // list + preview
+            Constraint::Length(1),  // gap
+            Constraint::Length(3),  // dangerous panel
+            Constraint::Length(1),  // hint
         ])
         .split(inner);
 
@@ -294,33 +373,66 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         )));
     }
     let cwd_w = (list_area.width as usize).saturating_sub(32).max(15);
+    let mut row_y = list_area.y;
     for i in start..end {
+        if row_y >= list_area.y + list_area.height {
+            break;
+        }
         let Some(t) = state.items.get(i).and_then(|idx| state.all.get(*idx)) else { continue };
         let is_sel = i == state.selected;
-        let prefix = if is_sel { "▶ " } else { "  " };
+        let row_rect = Rect {
+            x: list_area.x,
+            y: row_y,
+            width: list_area.width,
+            height: 1,
+        };
+        row_y += 1;
+
+        if is_sel {
+            let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
+            f.render_widget(bg, row_rect);
+            let strip = Rect { width: 1, ..row_rect };
+            let strip_style = Style::default()
+                .fg(theme::ACCENT_MAGENTA)
+                .bg(theme::BG_ACTIVE);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled("▎", strip_style))),
+                strip,
+            );
+        }
+
+        let text_rect = Rect {
+            x: row_rect.x + 2,
+            y: row_rect.y,
+            width: row_rect.width.saturating_sub(2),
+            height: 1,
+        };
         let age = crate::transcripts::humanize_age(t.mtime);
-        let cwd_str = t.cwd.display().to_string();
+        let cwd_str = collapse_cwd(&t.cwd.display().to_string());
         let size_kb = t.file_size / 1024;
         let cwd_cell = pad_right(&truncate(&cwd_str, cwd_w), cwd_w);
         let label = format!(
-            "{}{}  {:>8}  {:>7}KB  {}",
-            prefix,
+            "{}  {:>8}  {:>7}KB  {}",
             cwd_cell,
             age,
             size_kb,
             &t.session_id[..8.min(t.session_id.len())],
         );
+        let fg = if is_sel {
+            theme::BORDER_FOCUS
+        } else {
+            theme::FG
+        };
         let style = if is_sel {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(fg)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(fg)
         };
-        lines.push(Line::from(Span::styled(label, style)));
+        f.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), text_rect);
     }
-    f.render_widget(Paragraph::new(lines), list_area);
+    let _ = lines;
 
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -330,7 +442,7 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         vertical[2],
     );
 
-    f.render_widget(Paragraph::new(dangerous_line(state.dangerous)), vertical[3]);
+    draw_dangerous_panel(f, vertical[3], state.dangerous);
     f.render_widget(
         Paragraph::new(Span::styled(
             " ↑/↓ select  ·  type to filter  ·  Backspace clear  ·  Enter = resume  ·  Tab = toggle danger  ·  Esc cancel",
@@ -401,8 +513,9 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect, tile_sizes: &mut Til
         return;
     }
 
+    let tick = app.render_tick;
     if let Some(session) = app.sessions.get(app.focus) {
-        let inner = draw_tile(f, session, main, true, false, app.focus + 1);
+        let inner = draw_tile(f, session, main, true, false, app.focus + 1, tick);
         tile_sizes.push((app.focus, inner.height, inner.width));
         app.last_tile_area = Some(inner);
     }
@@ -501,25 +614,44 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         };
         let avail_width = text_area.width as usize;
 
+        let mut header: Vec<Span> = vec![
+            Span::styled(
+                format!("{} ", badge_glyph),
+                Style::default()
+                    .fg(badge_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("[{}]", i + 1), num_style),
+        ];
+        if s.permission_pending {
+            header.push(Span::styled(
+                "●",
+                Style::default()
+                    .fg(theme::ACCENT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            header.push(Span::raw(" "));
+        }
+        header.push(Span::styled(
+            resume_tag.to_string(),
+            Style::default().fg(theme::ACCENT_CYAN),
+        ));
+        header.push(Span::styled(
+            danger.to_string(),
+            Style::default().fg(theme::ACCENT_RED),
+        ));
+        header.push(Span::raw(" "));
+        header.push(Span::styled(
+            format!("{}{}", s.label, state_suffix),
+            label_style,
+        ));
+
+        let cwd_str = collapse_cwd(&s.cwd.display().to_string());
         let lines: Vec<Line> = vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", badge_glyph),
-                    Style::default()
-                        .fg(badge_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("[{}]", i + 1), num_style),
-                Span::styled(resume_tag.to_string(), Style::default().fg(theme::ACCENT_CYAN)),
-                Span::styled(danger.to_string(), Style::default().fg(theme::ACCENT_RED)),
-                Span::raw(" "),
-                Span::styled(format!("{}{}", s.label, state_suffix), label_style),
-            ]),
+            Line::from(header),
             Line::from(Span::styled(
-                format!(
-                    "    {}",
-                    truncate(&s.cwd.display().to_string(), avail_width.saturating_sub(4))
-                ),
+                format!("    {}", truncate(&cwd_str, avail_width.saturating_sub(4))),
                 Style::default().fg(theme::FG_DIM),
             )),
             Line::from(Span::styled(
@@ -532,6 +664,22 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         ];
         f.render_widget(Paragraph::new(lines), text_area);
     }
+}
+
+fn collapse_cwd(p: &str) -> String {
+    let home = std::env::var_os("HOME").map(|h| h.to_string_lossy().into_owned());
+    let mut s = match &home {
+        Some(h) if p.starts_with(h.as_str()) => format!("~{}", &p[h.len()..]),
+        _ => p.to_string(),
+    };
+    // collapse middle segments if path is deep
+    let segs: Vec<&str> = s.split('/').collect();
+    if segs.len() > 5 {
+        let head = segs[..2].join("/");
+        let tail = segs[segs.len() - 2..].join("/");
+        s = format!("{}/…/{}", head, tail);
+    }
+    s
 }
 
 fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
@@ -593,10 +741,18 @@ fn draw_tile(
     focused: bool,
     zoomed: bool,
     display_num: usize,
+    render_tick: u64,
 ) -> Rect {
     let alive = session.alive.load(std::sync::atomic::Ordering::SeqCst);
+    let pulse_on = render_tick.is_multiple_of(2);
     let border_color = if !alive {
         theme::BORDER_DEAD
+    } else if session.permission_pending {
+        if pulse_on {
+            theme::BORDER_DEAD
+        } else {
+            theme::ACCENT_RED_DIM
+        }
     } else if zoomed {
         theme::ACCENT_MAGENTA
     } else if focused {
@@ -604,11 +760,7 @@ fn draw_tile(
     } else {
         theme::BORDER_IDLE
     };
-    let title_color = if !alive {
-        theme::BORDER_DEAD
-    } else {
-        border_color
-    };
+    let title_color = border_color;
     let danger = if session.dangerous { " ⚠ " } else { " " };
     let zoom_marker = if zoomed { "↕ " } else { "" };
     let state = if !alive { " EXITED" } else { "" };
@@ -630,44 +782,62 @@ fn draw_tile(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let content_area = Rect {
+        x: inner.x.saturating_add(1),
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height,
+    };
+
+    let cursor_bg = if session.permission_pending {
+        theme::ACCENT_RED
+    } else {
+        match session.claude_status {
+            ClaudeStatus::Busy => theme::ACCENT_GREEN,
+            ClaudeStatus::Idle => theme::ACCENT_CYAN,
+            ClaudeStatus::Unknown => theme::FG,
+        }
+    };
+
     if let Ok(parser) = session.parser.lock() {
-        let widget = TermWidget::new(&parser.term).with_selection(session.selection);
-        f.render_widget(widget, inner);
+        let widget = TermWidget::new(&parser.term)
+            .with_selection(session.selection)
+            .with_cursor_bg(cursor_bg);
+        f.render_widget(widget, content_area);
     }
-    inner
+    content_area
 }
 
 fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
     let w = area.width.saturating_sub(8).clamp(50, 90);
     let h = area.height.saturating_sub(4).clamp(14, 28);
-    let inner = open_popup(f, area, w, h, " Spawn claude — pick a folder ", Color::Cyan);
+    let inner = open_popup(f, area, w, h, " Spawn claude — pick a folder ", theme::ACCENT_CYAN);
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(1),  // cwd
+            Constraint::Length(1),  // separator
+            Constraint::Min(3),     // list
+            Constraint::Length(1),  // gap
+            Constraint::Length(3),  // dangerous toggle (3 rows w/ vertical centering)
+            Constraint::Length(1),  // gap
+            Constraint::Length(1),  // hint
         ])
         .split(inner);
 
-    let cwd_str = spawn.cwd.display().to_string();
+    let cwd_str = collapse_cwd(&spawn.cwd.display().to_string());
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" cwd: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(cwd_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" cwd  ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(
+                cwd_str,
+                Style::default()
+                    .fg(theme::ACCENT_YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])),
         layout[0],
-    );
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " ─────────────────────",
-            Style::default().fg(Color::DarkGray),
-        )),
-        layout[1],
     );
 
     let list_area = layout[2];
@@ -680,47 +850,179 @@ fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
     };
     let end = (start + visible).min(total);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(end - start);
     if spawn.entries.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no subdirectories — press Enter to spawn here, or ← to go up)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  (no subdirectories — press Enter to spawn here, or ← to go up)",
+                Style::default().fg(theme::FG_DIM),
+            ))),
+            list_area,
+        );
     }
-    for i in start..end {
+    for (offset, i) in (start..end).enumerate() {
+        let row_y = list_area.y + offset as u16;
+        if row_y >= list_area.y + list_area.height {
+            break;
+        }
+        let row_rect = Rect {
+            x: list_area.x,
+            y: row_y,
+            width: list_area.width,
+            height: 1,
+        };
         let name = spawn.entries[i]
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let is_sel = i == spawn.selected;
-        let prefix = if is_sel { "▶ " } else { "  " };
+
+        if is_sel {
+            let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
+            f.render_widget(bg, row_rect);
+            let strip = Rect { width: 1, ..row_rect };
+            let strip_style = Style::default()
+                .fg(theme::ACCENT_CYAN)
+                .bg(theme::BG_ACTIVE);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled("▎", strip_style))),
+                strip,
+            );
+        }
+        let text_rect = Rect {
+            x: row_rect.x + 2,
+            y: row_rect.y,
+            width: row_rect.width.saturating_sub(2),
+            height: 1,
+        };
         let style = if is_sel {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(theme::ACCENT_CYAN)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::FG)
         };
-        lines.push(Line::from(Span::styled(format!("{}{}/", prefix, name), style)));
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!("{}/", name), style))),
+            text_rect,
+        );
     }
-    f.render_widget(Paragraph::new(lines), list_area);
 
-    f.render_widget(Paragraph::new(dangerous_line(spawn.dangerous)), layout[3]);
+    draw_dangerous_panel(f, layout[4], spawn.dangerous);
+
+    let pairs = [
+        ("↑↓", "select"),
+        ("→", "descend"),
+        ("←", "ascend"),
+        ("Space", "danger"),
+        ("Enter", "pick"),
+        ("Esc", "cancel"),
+    ];
+    // pre-compute total content width to evenly distribute remaining space as gaps
+    let content_width: usize = pairs
+        .iter()
+        .map(|(k, l)| k.chars().count() + 2 + 1 + l.chars().count())
+        .sum::<usize>();
+    let avail = layout[4].width as usize;
+    let gap_count = pairs.len() + 1;
+    let gap = avail
+        .saturating_sub(content_width)
+        .checked_div(gap_count)
+        .unwrap_or(1)
+        .max(1);
+    let gap_str = " ".repeat(gap);
+
+    let mut hint: Vec<Span<'static>> = Vec::new();
+    for (key, label) in pairs.iter() {
+        hint.push(Span::raw(gap_str.clone()));
+        hint.extend(kbd_chip(key));
+        hint.push(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(theme::FG_MUTED),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(hint)), layout[6]);
+}
+
+fn draw_dangerous_panel(f: &mut Frame, area: Rect, active: bool) {
+    let (status_color, status_text, label_color, label_mod) = if active {
+        (
+            theme::ACCENT_RED,
+            "● ON",
+            theme::ACCENT_RED,
+            Modifier::BOLD,
+        )
+    } else {
+        (theme::FG_DIM, "○ OFF", theme::FG, Modifier::empty())
+    };
+
+    let panel_bg = if active {
+        Color::Rgb(0x33, 0x1a, 0x22)
+    } else {
+        theme::BG_ACTIVE
+    };
     f.render_widget(
-        Paragraph::new(Span::styled(
-            " ─────────────────────",
-            Style::default().fg(Color::DarkGray),
-        )),
-        layout[4],
+        Block::default().style(Style::default().bg(panel_bg)),
+        area,
     );
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " ↑/↓ select  ·  → descend  ·  ← ascend  ·  Space danger  ·  Enter Pick  ·  Esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-        layout[5],
-    );
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Length(20),
+        ])
+        .split(area);
+
+    let mid_row = area.y + area.height / 2;
+
+    let status_line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            status_text.to_string(),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let label_line = Line::from(Span::styled(
+        "--dangerously-skip-permissions".to_string(),
+        Style::default().fg(label_color).add_modifier(label_mod),
+    ))
+    .alignment(ratatui::layout::Alignment::Center);
+    let key_line = {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.extend(kbd_chip("Space"));
+        spans.push(Span::styled(
+            " toggles ",
+            Style::default().fg(theme::FG_DIM),
+        ));
+        Line::from(spans).alignment(ratatui::layout::Alignment::Right)
+    };
+
+    let single = Rect {
+        x: cols[0].x,
+        y: mid_row,
+        width: cols[0].width,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(status_line).style(Style::default().bg(panel_bg)), single);
+
+    let single2 = Rect {
+        x: cols[1].x,
+        y: mid_row,
+        width: cols[1].width,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(label_line).style(Style::default().bg(panel_bg)), single2);
+
+    let single3 = Rect {
+        x: cols[2].x,
+        y: mid_row,
+        width: cols[2].width,
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(key_line).style(Style::default().bg(panel_bg)), single3);
 }
 
 fn footer_for(app: &App) -> Line<'static> {

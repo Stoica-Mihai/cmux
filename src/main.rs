@@ -85,6 +85,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             .iter()
             .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
         let elapsed = now.saturating_sub(last_draw_ms);
+        if let Some(t) = &app.toast
+            && now >= t.expires_at_ms
+        {
+            app.toast = None;
+            app.needs_redraw = true;
+        }
         if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
             app.render_tick = app.render_tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
@@ -171,7 +177,13 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
             let text = term_render::extract_selection(&p.term, sel);
             drop(p);
             if !text.trim().is_empty() {
+                let count = text.chars().count();
                 emit_osc52(&text);
+                app.toast = Some(app::Toast {
+                    text: format!("copied ✓ {} chars", count),
+                    expires_at_ms: util::now_ms() + 1400,
+                });
+                app.needs_redraw = true;
             }
         }
         _ => {}

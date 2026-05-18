@@ -29,6 +29,7 @@ impl Dimensions for TermSize {
 pub struct TermWidget<'a> {
     term: &'a Term<VoidListener>,
     selection: Option<TileSelection>,
+    cursor_bg: Option<RColor>,
 }
 
 impl<'a> TermWidget<'a> {
@@ -36,11 +37,17 @@ impl<'a> TermWidget<'a> {
         Self {
             term,
             selection: None,
+            cursor_bg: None,
         }
     }
 
     pub fn with_selection(mut self, sel: Option<TileSelection>) -> Self {
         self.selection = sel;
+        self
+    }
+
+    pub fn with_cursor_bg(mut self, bg: RColor) -> Self {
+        self.cursor_bg = Some(bg);
         self
     }
 }
@@ -214,9 +221,9 @@ impl<'a> Widget for TermWidget<'a> {
                 .map(|s| s.contains(row as u16, col as u16))
                 .unwrap_or(false);
             if in_selection {
-                bg = RColor::Rgb(0x58, 0x5b, 0x70);
+                bg = crate::theme::SELECTION_BG;
                 if matches!(fg, RColor::Reset) {
-                    fg = RColor::Rgb(0xcd, 0xd6, 0xf4);
+                    fg = crate::theme::FG;
                 }
             }
 
@@ -246,15 +253,16 @@ impl<'a> Widget for TermWidget<'a> {
                         let existing = buf_cell.style();
                         let underlying_fg = existing.fg.unwrap_or(RColor::Reset);
                         let underlying_bg = existing.bg.unwrap_or(RColor::Reset);
+                        let fallback_bg = if matches!(underlying_fg, RColor::Reset) {
+                            RColor::Gray
+                        } else {
+                            underlying_fg
+                        };
+                        let new_bg = self.cursor_bg.unwrap_or(fallback_bg);
                         let new_fg = if matches!(underlying_bg, RColor::Reset) {
                             RColor::Black
                         } else {
                             underlying_bg
-                        };
-                        let new_bg = if matches!(underlying_fg, RColor::Reset) {
-                            RColor::Gray
-                        } else {
-                            underlying_fg
                         };
                         let style = Style::default()
                             .fg(new_fg)

@@ -16,9 +16,11 @@ pub const ACCENT_CYAN: Color = Color::Rgb(0x89, 0xdc, 0xeb);
 pub const ACCENT_YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
 pub const ACCENT_PEACH: Color = Color::Rgb(0xfa, 0xb3, 0x87);
 pub const ACCENT_RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
+pub const ACCENT_RED_DIM: Color = Color::Rgb(0xc9, 0x74, 0x8d);
 pub const ACCENT_MAGENTA: Color = Color::Rgb(0xcb, 0xa6, 0xf7);
 
 pub const BG_ACTIVE: Color = Color::Rgb(0x31, 0x32, 0x44);
+pub const SELECTION_BG: Color = Color::Rgb(0x58, 0x5b, 0x70);
 
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
