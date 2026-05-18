@@ -1,7 +1,7 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color as AlaColor, NamedColor, Rgb};
 use ratatui::buffer::Buffer;
@@ -37,6 +37,11 @@ impl<'a> TermWidget<'a> {
     }
 }
 
+fn is_continuation(cell: &Cell) -> bool {
+    cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+        || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+}
+
 impl<'a> Widget for TermWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
@@ -64,9 +69,7 @@ impl<'a> Widget for TermWidget<'a> {
             if row >= max_rows || col >= max_cols {
                 continue;
             }
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
+            if is_continuation(cell) {
                 continue;
             }
 
@@ -236,9 +239,7 @@ pub fn visible_text(term: &Term<VoidListener>) -> String {
             }
             current_line = Some(line);
         }
-        if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-            || indexed.cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-        {
+        if is_continuation(indexed.cell) {
             continue;
         }
         let c = indexed.cell.c;

@@ -36,20 +36,49 @@ pub fn draw(f: &mut Frame, app: &App, tile_sizes: &mut TileSizes) {
     }
 }
 
+fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn titled_block(title: impl Into<String>, color: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title.into())
+        .border_style(Style::default().fg(color))
+}
+
+fn open_popup(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str, color: Color) -> Rect {
+    let popup = centered_rect(area, w, h);
+    f.render_widget(Clear, popup);
+    let block = titled_block(title.to_string(), color);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    inner
+}
+
+fn dangerous_line(active: bool) -> Line<'static> {
+    if active {
+        Line::from(Span::styled(
+            " [x] --dangerously-skip-permissions  (Space toggles)",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " [ ] --dangerously-skip-permissions  (Space toggles)",
+            Style::default().fg(Color::Gray),
+        ))
+    }
+}
+
 fn draw_help_popup(f: &mut Frame, area: Rect) {
     let w = area.width.saturating_sub(4).clamp(60, 76);
     let h = area.height.saturating_sub(2).clamp(20, 28);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" cmux — cheat sheet ")
-        .border_style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = open_popup(f, area, w, h, " cmux — cheat sheet ", Color::Yellow);
 
     let header = |s: &'static str| {
         Line::from(Span::styled(
@@ -112,17 +141,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
 fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
     let w = area.width.clamp(40, 60);
     let h: u16 = 7;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Detach session? ")
-        .border_style(Style::default().fg(Color::Red));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = open_popup(f, area, w, h, " Detach session? ", Color::Red);
 
     let (pos, label) = app
         .sessions
@@ -148,17 +167,17 @@ fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
 }
 
 fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState) {
-    let w = area.width.saturating_sub(2);
-    let h = area.height.saturating_sub(2);
-    let x = area.x + 1;
-    let y = area.y + 1;
-    let popup = Rect { x, y, width: w, height: h };
-
+    let popup = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Resume past session ({} found) ", state.items.len()))
-        .border_style(Style::default().fg(Color::Magenta));
+    let block = titled_block(
+        format!(" Resume past session ({} found) ", state.items.len()),
+        Color::Magenta,
+    );
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
@@ -270,18 +289,7 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         vertical[2],
     );
 
-    let danger_line = if state.dangerous {
-        Line::from(Span::styled(
-            " [x] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::from(Span::styled(
-            " [ ] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Gray),
-        ))
-    };
-    f.render_widget(Paragraph::new(danger_line), vertical[3]);
+    f.render_widget(Paragraph::new(dangerous_line(state.dangerous)), vertical[3]);
     f.render_widget(
         Paragraph::new(Span::styled(
             " ↑/↓ select  ·  type to filter  ·  Backspace clear  ·  Enter = resume  ·  Tab = toggle danger  ·  Esc cancel",
@@ -294,17 +302,7 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
 fn draw_rename_popup(f: &mut Frame, area: Rect, state: &crate::app::RenameState, app: &App) {
     let w = area.width.clamp(30, 60);
     let h: u16 = 7;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Rename session ")
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = open_popup(f, area, w, h, " Rename session ", Color::Cyan);
 
     let id_label = app
         .sessions
@@ -357,12 +355,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect, tile_sizes: &mut TileSiz
                 Style::default().fg(Color::Gray),
             )),
         ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" preview ")
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
+        .block(titled_block(" preview ", Color::DarkGray));
         f.render_widget(empty, main);
         return;
     }
@@ -374,10 +367,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect, tile_sizes: &mut TileSiz
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" sessions ")
-        .border_style(Style::default().fg(Color::Green));
+    let block = titled_block(" sessions ", Color::Green);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -494,17 +484,7 @@ fn draw_tile(
 fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
     let w = area.width.saturating_sub(8).clamp(50, 90);
     let h = area.height.saturating_sub(4).clamp(14, 28);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Spawn claude — pick a folder ")
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = open_popup(f, area, w, h, " Spawn claude — pick a folder ", Color::Cyan);
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -570,18 +550,7 @@ fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
     }
     f.render_widget(Paragraph::new(lines), list_area);
 
-    let danger_line = if spawn.dangerous {
-        Line::from(Span::styled(
-            " [x] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::from(Span::styled(
-            " [ ] --dangerously-skip-permissions  (Space toggles)",
-            Style::default().fg(Color::Gray),
-        ))
-    };
-    f.render_widget(Paragraph::new(danger_line), layout[3]);
+    f.render_widget(Paragraph::new(dangerous_line(spawn.dangerous)), layout[3]);
     f.render_widget(
         Paragraph::new(Span::styled(
             " ─────────────────────",

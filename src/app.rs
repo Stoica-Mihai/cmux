@@ -47,9 +47,7 @@ impl PickerState {
         self.items.get(self.selected).and_then(|i| self.all.get(*i))
     }
     pub fn move_sel(&mut self, delta: i32) {
-        if self.items.is_empty() { return; }
-        let n = self.items.len() as i32;
-        self.selected = ((self.selected as i32 + delta).rem_euclid(n)) as usize;
+        self.selected = crate::util::wrap_index(self.selected, self.items.len(), delta);
         self.ensure_preview();
     }
     pub fn ensure_preview(&mut self) {
@@ -81,11 +79,10 @@ impl PickerState {
 }
 
 fn dirs_path(cwd: &Path, session_id: &str) -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let slug = cwd.display().to_string().replace('/', "-");
-    home.join(".claude").join("projects").join(slug).join(format!("{}.jsonl", session_id))
+    crate::util::claude_projects_dir()
+        .unwrap_or_default()
+        .join(crate::transcripts::slug_encode(cwd))
+        .join(format!("{}.jsonl", session_id))
 }
 
 pub struct SpawnState {
@@ -123,11 +120,7 @@ impl SpawnState {
     }
 
     pub fn move_sel(&mut self, delta: i32) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let n = self.entries.len() as i32;
-        self.selected = ((self.selected as i32 + delta).rem_euclid(n)) as usize;
+        self.selected = crate::util::wrap_index(self.selected, self.entries.len(), delta);
     }
 
     pub fn descend(&mut self) {
@@ -235,12 +228,7 @@ impl App {
     }
 
     pub fn cycle_focus(&mut self, delta: i32) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        let n = self.sessions.len() as i32;
-        let next = (self.focus as i32 + delta).rem_euclid(n);
-        self.focus = next as usize;
+        self.focus = crate::util::wrap_index(self.focus, self.sessions.len(), delta);
     }
 
     pub fn reap_dead(&mut self) {

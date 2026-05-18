@@ -5,6 +5,8 @@ mod session;
 mod term_render;
 mod transcripts;
 mod ui;
+#[macro_use]
+mod util;
 
 use std::io::stdout;
 use std::path::PathBuf;
@@ -97,18 +99,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
 }
 
 fn log_key(key: &KeyEvent, prefix_pending: bool) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cmux-keys.log")
-    {
-        let _ = writeln!(
-            f,
-            "code={:?} mods={:?} kind={:?} prefix_pending={}",
-            key.code, key.modifiers, key.kind, prefix_pending
-        );
-    }
+    debug_log!(
+        "/tmp/cmux-keys.log",
+        "code={:?} mods={:?} kind={:?} prefix_pending={}",
+        key.code,
+        key.modifiers,
+        key.kind,
+        prefix_pending
+    );
 }
 
 fn resize_all(app: &mut App) {
@@ -300,24 +298,17 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         _ => {}
     }
-    if std::env::var_os("CMUX_DEBUG").is_some() {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/cmux-keys.log")
-        {
-            let mode_after = format!("{:?}", std::mem::discriminant(&app.mode));
-            let _ = writeln!(
-                f,
-                "  CHORD {} mode_before={} mode_after={} sessions={} focus={}",
-                ch,
-                mode_before,
-                mode_after,
-                app.sessions.len(),
-                app.focus
-            );
-        }
+    if util::debug_enabled() {
+        let mode_after = format!("{:?}", std::mem::discriminant(&app.mode));
+        debug_log!(
+            "/tmp/cmux-keys.log",
+            "  CHORD {} mode_before={} mode_after={} sessions={} focus={}",
+            ch,
+            mode_before,
+            mode_after,
+            app.sessions.len(),
+            app.focus
+        );
     }
     Ok(())
 }
@@ -369,8 +360,9 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
                 match app.spawn_resume(cwd, dangerous, session_id) {
                     Ok(()) => {
                         app.status = format!(
-                            "resumed session [{}]  ·  Ctrl+A then n/l/↑↓/d/z/q",
-                            app.sessions.len()
+                            "resumed session [{}]  ·  {}",
+                            app.sessions.len(),
+                            util::PREFIX_HINT
                         );
                         resize_all(app);
                         persist_now(app);
@@ -438,8 +430,9 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
             match app.spawn_session(chosen, dangerous) {
                 Ok(()) => {
                     app.status = format!(
-                        "spawned session [{}]  ·  Ctrl+A then n/l/↑↓/d/z/q",
-                        app.sessions.len()
+                        "spawned session [{}]  ·  {}",
+                        app.sessions.len(),
+                        util::PREFIX_HINT
                     );
                     resize_all(app);
                     persist_now(app);
@@ -495,9 +488,7 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
 
 fn move_focused(app: &mut App, delta: i32) {
     if app.sessions.is_empty() { return; }
-    let n = app.sessions.len() as i32;
-    let from = app.focus as i32;
-    let to = (from + delta).rem_euclid(n) as usize;
+    let to = util::wrap_index(app.focus, app.sessions.len(), delta);
     app.sessions.swap(app.focus, to);
     app.focus = to;
 }

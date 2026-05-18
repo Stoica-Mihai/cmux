@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::util::claude_projects_dir;
+
 pub struct Transcript {
     pub session_id: String,
     pub cwd: PathBuf,
@@ -8,9 +10,24 @@ pub struct Transcript {
     pub file_size: u64,
 }
 
+pub fn slug_encode(cwd: &Path) -> String {
+    cwd.display().to_string().replace('/', "-")
+}
+
+pub fn slug_decode(dir: &Path) -> PathBuf {
+    let name = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut s = name.replace('-', "/");
+    if !s.starts_with('/') {
+        s.insert(0, '/');
+    }
+    PathBuf::from(s)
+}
+
 pub fn scan() -> Vec<Transcript> {
-    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let root = PathBuf::from(home).join(".claude").join("projects");
+    let Some(root) = claude_projects_dir() else { return Vec::new() };
     let Ok(read_root) = std::fs::read_dir(&root) else { return Vec::new() };
 
     let mut out: Vec<Transcript> = Vec::new();
@@ -29,7 +46,7 @@ pub fn scan() -> Vec<Transcript> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let cwd = extract_cwd(&p).unwrap_or_else(|| decode_slug(&proj_dir));
+            let cwd = extract_cwd(&p).unwrap_or_else(|| slug_decode(&proj_dir));
             out.push(Transcript {
                 session_id,
                 cwd,
@@ -55,18 +72,6 @@ fn extract_cwd(path: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn decode_slug(dir: &Path) -> PathBuf {
-    let name = dir
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let mut s = name.replace('-', "/");
-    if !s.starts_with('/') {
-        s.insert(0, '/');
-    }
-    PathBuf::from(s)
 }
 
 pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {

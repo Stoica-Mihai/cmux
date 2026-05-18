@@ -10,11 +10,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::debug_log;
 use crate::term_render::{self, TermSize};
+use crate::util::{claude_sessions_dir, now_ms};
 
 const SCROLLBACK_LINES: usize = 4096;
+
+fn pty_size(rows: u16, cols: u16) -> PtySize {
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
 
 pub struct TerminalState {
     pub term: Term<VoidListener>,
@@ -96,12 +106,7 @@ impl Session {
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .openpty(pty_size(rows, cols))
             .context("openpty")?;
 
         let mut cmd = CommandBuilder::new("claude");
@@ -128,11 +133,8 @@ impl Session {
         let writer = pair.master.take_writer().context("take writer")?;
         let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let last_active_ms = Arc::new(AtomicU64::new(now_ms));
+        let spawn_ms = now_ms();
+        let last_active_ms = Arc::new(AtomicU64::new(spawn_ms));
 
         let reader_thread = {
             let parser = parser.clone();
@@ -150,11 +152,7 @@ impl Session {
                                 if let Ok(mut p) = parser.lock() {
                                     p.process(&buf[..n]);
                                 }
-                                let t = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_millis() as u64)
-                                    .unwrap_or(0);
-                                last_active.store(t, Ordering::SeqCst);
+                                last_active.store(now_ms(), Ordering::SeqCst);
                             }
                             Err(_) => break,
                         }
@@ -174,7 +172,7 @@ impl Session {
             size: (rows, cols),
             alive,
             last_active_ms,
-            created_ms: now_ms,
+            created_ms: spawn_ms,
             pid,
             claude_status: String::new(),
             claude_name: None,
@@ -190,19 +188,14 @@ impl Session {
     }
 
     pub fn poll_status(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now = now_ms();
         if now.saturating_sub(self.last_status_check_ms) < 500 {
             return;
         }
         self.last_status_check_ms = now;
 
         if let Some(pid) = self.pid {
-            let path = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|h| h.join(".claude").join("sessions").join(format!("{}.json", pid)));
+            let path = claude_sessions_dir().map(|d| d.join(format!("{}.json", pid)));
             if let Some(path) = path
                 && let Ok(bytes) = std::fs::read(&path)
                 && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -226,15 +219,12 @@ impl Session {
     fn detect_permission_prompt(&self) -> bool {
         let Ok(p) = self.parser.lock() else { return false };
         let text = term_render::visible_text(&p.term);
-        if std::env::var_os("CMUX_DEBUG").is_some()
-            && let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(format!("/tmp/cmux-screen-{}.txt", self.id))
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "\n========= scan at id={} =========\n{}\n", self.id, text);
-        }
+        debug_log!(
+            &format!("/tmp/cmux-screen-{}.txt", self.id),
+            "\n========= scan at id={} =========\n{}\n",
+            self.id,
+            text
+        );
         let lower = text.to_lowercase();
         lower.contains("do you want to proceed")
             || lower.contains("allow this")
@@ -247,11 +237,7 @@ impl Session {
     }
 
     pub fn activity_age_ms(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        now.saturating_sub(self.last_active_ms.load(Ordering::SeqCst))
+        now_ms().saturating_sub(self.last_active_ms.load(Ordering::SeqCst))
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
@@ -266,12 +252,7 @@ impl Session {
         }
         self.size = (rows, cols);
         self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .resize(pty_size(rows, cols))
             .context("resize pty")?;
         if let Ok(mut p) = self.parser.lock() {
             p.resize(rows, cols);
