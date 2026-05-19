@@ -94,9 +94,19 @@ cmux/
 2. Tries `connect()`. If success → attach handshake.
 3. If `ENOENT` / `ECONNREFUSED`:
    - Acquire `/run/user/<UID>/cmux/cmuxd.lock` via `fcntl(F_SETLK)`.
-   - If lock acquired: this client owns the spawn. `fork()` + `setsid()` + `fork()` (double-fork, classic daemonize) → exec self with `--daemon` arg. Parent waits up to 2s for socket to appear (`inotify` or 50ms polling).
-   - If lock contended: another client is mid-spawn. Poll the socket for up to 2s.
+   - If lock acquired: this client owns the spawn. `fork()` + `setsid()` + `fork()` (double-fork, classic daemonize) → child closes all fds, opens `/dev/null` as 0/1/2, then exec self with `--daemon` arg. Parent waits up to 2 s for socket to appear (`inotify` watch on the parent dir or 50 ms polling).
+   - If lock contended: another client is mid-spawn. Poll the socket for up to 2 s.
 4. Connect, handshake, attach.
+
+### Spawn failure handling
+
+If the daemon panics mid-init, the lock releases, no socket appears, the client times out. Naive retry would loop forever.
+
+Retry policy:
+- Up to 3 spawn attempts, exponential backoff (250 ms, 500 ms, 1 s).
+- Each attempt: re-check socket, then re-acquire lock if absent.
+- After 3 failures: TUI prints `cmux: daemon failed to start (3/3 attempts). Run with --no-daemon for legacy mode or check ~/.local/state/cmux/cmuxd.log` and exits.
+- Daemon binary writes a tiny ready-stamp file (`$XDG_RUNTIME_DIR/cmux/cmuxd.ready`) atomically right after `bind()` + `listen()` succeed. Client polls for that file rather than the socket itself, so half-started states are distinguishable from "starting".
 
 ### Daemon shutdown
 
@@ -169,6 +179,12 @@ struct SessionInfo {
 
 Each `Request` from a client gets an optional `request_id` (u64, monotonic per connection). Responses correlate via that id when relevant. Pure events (FrameDelta, StatusUpdate) carry no id.
 
+### Input is the only PTY-write channel
+
+The TUI never sends "Mouse" or "Wheel" or "Paste" as protocol variants. Every byte the PTY should receive — keystrokes, SGR mouse encodings, OSC paste brackets, raw escape sequences — is wrapped in `Input { bytes }` after the TUI has already encoded it locally.
+
+The TUI knows the current `TermMode` because it runs its own `Processor` over the FrameDelta stream, so the term-mode-dependent encoding for mouse (SGR 1006 vs X10 vs alt-scroll arrows) is decided client-side. Daemon doesn't reason about input semantics; it just `master.write(bytes)`. This keeps the protocol surface small and avoids the daemon and TUI ever disagreeing on encoding strategy.
+
 ### Snapshot vs delta semantics
 
 - On `Attach` the daemon sends one `Snapshot` carrying a fully serialized `alacritty_terminal::Term` (the crate already has the `serde` feature on by default — verified in `Cargo.toml:35: default = ["serde"]` and serde-derive on `Grid`, `Cell`, `Cursor`, `Term`).
@@ -210,8 +226,19 @@ client task
 
 Concurrency primitives:
 - `tokio::sync::broadcast::channel<Bytes>` per session: reader fans out PTY bytes to N attached clients **and** to the parser task. Bounded (e.g. 1024 chunks); lagging clients drop frames and get a `Resync` event triggering a fresh snapshot.
-- `tokio::sync::Mutex<Term>` per session for parser+snapshot serialization. Keep the lock window inside `Processor::advance(bytes)` only.
+- `tokio::sync::Mutex<Term>` per session, locked **only** by the parser task during `Processor::advance(bytes)`. Snapshot task **does not** take the parser mutex (see below).
 - `tokio::sync::watch::channel<SessionInfo>` per session for status updates.
+
+### Snapshot concurrency
+
+The parser task holds the `Mutex<Term>` continuously while processing incoming PTY bursts. Serializing the Term while holding that lock would stall parsing under load.
+
+Strategy:
+
+1. Parser task, after each `Processor::advance`, also sets a per-session `dirty: AtomicBool` and a `snapshot_buffer: tokio::sync::watch::Sender<Arc<Term>>` to a freshly-cloned Term (cheap because `Cell` is `Clone` and `Grid` storage is `Storage<T>` which is `Vec`-based; the clone is a memcpy of cell data).
+2. Snapshot task wakes on a 5s interval. If `dirty` is set, it pulls the latest `Arc<Term>` from the watch channel, clears `dirty`, then serializes the clone off the hot path. Parser task never blocks on serialization.
+
+`Term::clone` cost: ~12k cells × ~50 bytes × scrollback factor ≈ 4–40 MiB depending on history. Memcpy of contiguous storage, ~1 ms in practice for 4096-line scrollback. Acceptable. Benchmark in phase 5 if it regresses.
 
 ### PTY ownership
 
@@ -232,7 +259,17 @@ Daemon owns this entirely now. The `~/.claude/sessions/<pid>.json` reads move of
 
 1. **Session manifest** — `~/.config/cmux/state.json`, same shape as today (`PersistedSession[]`). Daemon owns the writer (debounced, just like current TUI does). Survives daemon crash → next daemon start respawns each entry via `claude --resume <id>`. **This is the only persistence cmux has today.** Daemon inherits it.
 
-2. **Optional Term snapshot** — `~/.cache/cmux/snapshots/<session_id>.term.bin` (postcard or `serde_json`). Written every N seconds by parser task, or on graceful shutdown. On daemon restart, deserialize and seed the per-session `Term`; **then** spawn claude with `--resume`. End result: TUI client sees the last-known grid contents *and* claude resumes its conversation. Loss window = snapshot interval (default: 5s).
+2. **Optional Term snapshot** — `~/.cache/cmux/snapshots/<session_id>.term.bin` (postcard preferred for size). Written every 5 s by the snapshot task (see §7 "Snapshot concurrency"), or on graceful shutdown. On daemon restart, deserialize and seed the per-session `Term`; **then** spawn claude with `--resume`. End result: TUI client sees the last-known grid contents *and* claude resumes its conversation. Loss window = snapshot interval (default: 5 s).
+
+### Snapshot size discipline
+
+Worst case: 200 cols × (30 viewport + 4096 scrollback) lines × ~50 bytes per cell ≈ 40 MiB / session uncompressed. Times 5 sessions × 12 writes/min = 2.4 GB/min disk churn. Unacceptable.
+
+Bounds applied:
+- Snapshot only `scrollback_history.min(SNAPSHOT_HISTORY_CAP)` lines (default 512). Visible 30 lines + 512 history = 542 lines ≈ 5 MiB / session. Compresses to <1 MiB with postcard. The on-disk file replaces the previous (single file per session, not append-log).
+- Snapshot only when `dirty` flag set since last write (idle sessions skip).
+- One snapshot path per session, atomic rename (`write to .tmp, fsync, rename`).
+- `Term::clone` skips alt-screen alt grid if not active (alacritty's `inactive_grid` is dead state when primary is shown).
 
 ### Decisions
 
@@ -274,9 +311,10 @@ Single-PR-friendly path:
 ### Phase 4 — feature parity
 
 - All current operations (Detach, Rename, Reorder, Scroll, Resume picker, Spawn picker) wired through daemon.
-- Mouse / OSC52 stay client-side (the daemon never sees client mouse events).
+- Mouse / OSC52 stay client-side. TUI encodes mouse events as SGR/X10/arrow bytes locally (using its own `Term::mode()` mirror) and sends via `Input`. The daemon never has a "Mouse" Request variant.
 - Persistence moves to daemon; TUI's `flush_persist` is deleted.
 - `--connect` becomes the default. `--no-daemon` retained as escape hatch for two more releases.
+- **Dual code paths during phases 3+4:** maintaining both in-process and daemon-backed paths costs bookkeeping. Each new handler change must be applied to both branches until phase 5 drops `--no-daemon`. Plan budget: 3 dev-days for phase 3, 3 dev-days for phase 4 (revised up from original "2+2").
 
 ### Phase 5 — snapshot + reconnect
 
@@ -313,7 +351,9 @@ Same crate as `cmuxd` to share types. Doesn't need ratatui.
 | `cmuxd` session task | spawn `bash -c 'printf foo; read; printf bar'`, attach virtual client, assert Snapshot+FrameDelta sequence reproduces `"foo"` then `"bar"` after writing input |
 | `cmuxd` multi-client | two clients attach the same session, both receive identical FrameDelta stream within ε of arrival time |
 | `cmuxd` restart | spawn 3 sessions, SIGTERM daemon, restart, verify snapshots restored + claude resumed |
+| `cmuxd` snapshot bound | spawn session, fill scrollback, assert snapshot file on disk < 8 MiB and `Term::clone` measured < 5 ms |
 | Integration | spawn an actual `claude --help`-style child, complete a roundtrip via the real socket |
+| **Mouse forwarding** | TUI dispatches synthetic wheel/click/drag events; PTY receiver (under daemon) asserts exact byte sequence matches xterm SGR 1006 spec. Catches encoding bugs the property test misses because the property test generates bytes directly, skipping the TUI's mouse-to-SGR encoder. |
 | Property test | random byte sequences fed in via `Input`, assert local TUI `Term` state equals daemon's after snapshot+delta replay (uses alacritty's `Term::grid` equality) |
 
 CI changes: `cargo test --workspace`. Add `cargo build --release --workspace` to the build matrix.
@@ -334,6 +374,8 @@ CI changes: `cargo test --workspace`. Add `cargo build --release --workspace` to
 | Daemon-spawned claude inherits weird env | Daemon strips terminal-specific env (TERM_PROGRAM, COLORTERM…) and sets a stable subset (TERM=xterm-256color, plus the cwd-relevant vars). Document and snapshot the env it uses. |
 | Multiple users on one box | Daemon binds in `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` which is `$UID`-scoped. No cross-user collision. |
 | TUI hot reload (replace binary mid-attach) | Works naturally: TUI exits, daemon keeps sessions, new TUI binary connects. This is a *feature* of the design. |
+| `claude --resume <id>` running outside daemon while daemon respawns same id | Two `claude` processes with the same session id would corrupt the transcript. Mitigation: daemon checks for an existing `claude` process holding `~/.claude/projects/<slug>/<id>.jsonl` (via `fuser` or simple PID file) before respawning. If found, mark session as `Detached(External)` and refuse local respawn until the external process exits. Verify claude's own locking behavior in phase 3 before committing to the respawn-on-restart path. |
+| `Term::clone` cost regression after alacritty crate upgrade | Phase-5 microbenchmark gates the snapshot interval. If `Term::clone` exceeds 10 ms for 4096-line scrollback, raise snapshot interval to 15 s or shrink `SNAPSHOT_HISTORY_CAP`. |
 
 ---
 
@@ -345,6 +387,7 @@ CI changes: `cargo test --workspace`. Add `cargo build --release --workspace` to
 4. **Idle shutdown default**: never (current plan) vs after 24h with zero sessions. Never.
 5. **Logs**: `~/.local/state/cmux/cmuxd.log` rotated daily? Or systemd journal? Keep it simple — log to stderr while attached to terminal, redirect to file when daemonized.
 6. **Resize broadcast policy**: when client A resizes a session client B is also attached to, what does B see? Current plan: daemon honors the **last** resize; all attached clients agree to render at that geometry; mismatched clients see letterboxing. Document this.
+7. **claude --resume lock semantics**: claude itself may not lock the transcript file. Verify in phase 3 with two concurrent `claude --resume <id>` instances on the same id — does claude detect, refuse, or silently corrupt? Answer determines whether the daemon needs its own session-id mutex layer (PID file in `~/.cache/cmux/sessions/<id>.pid`) or can rely on claude's behaviour.
 
 ---
 
@@ -354,10 +397,10 @@ CI changes: `cargo test --workspace`. Add `cargo build --release --workspace` to
 |---|---|---|
 | 1 – workspace split | ~50 lines moved, Cargo.tomls | 1–2 h |
 | 2 – proto crate + daemon stub | ~400 lines | 1 day |
-| 3 – single-session through daemon | ~800 lines | 2 days |
-| 4 – feature parity & default-on | ~600 lines + 300 deleted | 2 days |
-| 5 – snapshot + reconnect + cmuxctl | ~500 lines | 1 day |
-| **Total** | **~2300 new lines, ~300 removed** | **~7 dev-days** |
+| 3 – single-session through daemon (with dual-path overhead) | ~800 lines | 3 days |
+| 4 – feature parity & default-on (with dual-path bookkeeping) | ~600 lines + 300 deleted | 3 days |
+| 5 – snapshot + reconnect + cmuxctl + benchmarks | ~500 lines | 1.5 days |
+| **Total** | **~2300 new lines, ~300 removed** | **~9 dev-days** |
 
 Real calendar time will be longer once edge cases (TUI hot-attach race, multi-client resize semantics, snapshot format) surface.
 
@@ -365,12 +408,16 @@ Real calendar time will be longer once edge cases (TUI hot-attach race, multi-cl
 
 ## 15. Acceptance criteria (definition of done)
 
-- `cmux` opens — daemon auto-spawns.
+- `cmux` opens — daemon auto-spawns. Lock-file + ready-stamp pattern verified by stracing the first launch.
 - Spawn 3 sessions, type in each, close `cmux` window with Ctrl-Q.
 - Re-run `cmux`. All 3 sessions present in sidebar, scrollback intact, claude conversation resumes via `--resume`.
 - `pkill -9 cmuxd && cmux` — sessions list survives (claude conversations resume via the existing manifest path); recent scrollback may be a few seconds stale; cmux still works.
-- Two `cmux` instances open simultaneously can both attach to the same session; both see each other's typing in real time.
+- Two `cmux` instances open simultaneously can both attach to the same session; both see each other's typing in real time. Resize from one updates the other (last-writer-wins per §13.6). Confirmed visually.
+- Mouse drag-select on one client copies to that client's clipboard via OSC 52; the other client's view shows no spurious selection (selection state is client-local, not daemon-shared).
 - `cmuxctl shutdown` cleanly stops everything; nothing left in `ps`.
+- `cmuxctl status` reports per-session: `pid`, `uptime`, `last_snapshot_age_ms`, `rss_bytes`. Used to verify snapshot cadence and memory bounds.
 - `--no-daemon` (phase 4 transitional flag) makes cmux behave exactly as today.
+- Snapshot file for any session never exceeds 8 MiB (per §8 bounds).
+- Mouse wheel inside focused tile produces well-formed SGR 1006 bytes at the PTY (verified via the integration test in §11).
 
 When all of the above pass, ship it.
