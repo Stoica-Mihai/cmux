@@ -152,6 +152,15 @@ fn apply_scroll_lines(app: &mut App, delta: i32) {
 }
 
 fn handle_mouse(app: &mut App, me: MouseEvent) {
+    debug_log!(
+        "/tmp/cmux-wheel.log",
+        "mouse kind={:?} col={} row={} mods={:?} tile={:?}",
+        me.kind,
+        me.column,
+        me.row,
+        me.modifiers,
+        app.last_tile_area
+    );
     let Some(tile) = app.last_tile_area else { return };
     let inside = me.column >= tile.x
         && me.column < tile.x + tile.width
