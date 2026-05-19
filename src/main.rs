@@ -191,13 +191,36 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             let up = matches!(me.kind, MouseEventKind::ScrollUp);
+            debug_log!(
+                "/tmp/cmux-wheel.log",
+                "wheel up={} mode={:?} ts={}",
+                up,
+                std::mem::discriminant(&app.mode),
+                util::now_ms()
+            );
             if matches!(app.mode, Mode::Scrollback(_)) {
-                // we built the ring view manually — scroll it
                 apply_scroll_lines(app, if up { 3 } else { -3 });
             } else if let Some(s) = app.sessions.get_mut(app.focus) {
-                // forward PgUp/PgDn so claude's own scrollback engages
+                let mouse_mode = s
+                    .parser
+                    .lock()
+                    .ok()
+                    .map(|p| format!("{:?}", p.term.mode()))
+                    .unwrap_or_default();
+                const WHEEL_LINES: usize = 5;
                 let seq: &[u8] = if up { b"\x1b[5~" } else { b"\x1b[6~" };
-                let _ = s.write(seq);
+                let mut buf: Vec<u8> = Vec::with_capacity(seq.len() * WHEEL_LINES);
+                for _ in 0..WHEEL_LINES {
+                    buf.extend_from_slice(seq);
+                }
+                let res = s.write(&buf);
+                debug_log!(
+                    "/tmp/cmux-wheel.log",
+                    "  send pty bytes={} write_ok={} term_mode={}",
+                    buf.len(),
+                    res.is_ok(),
+                    mouse_mode
+                );
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
