@@ -48,14 +48,17 @@ cargo run -p cmux -- ctl list    # admin CLI
 Persistent sessions across `cmux` exits.
 
 ```
-# terminal A: start the daemon (leave running)
-cmuxd
-
-# terminal B: open the TUI, talking to the daemon
 cmux --connect
 ```
 
+That's it — if no `cmuxd` is running, `cmux --connect` auto-spawns one in the background (binary next to `cmux`, then `$PATH`) and waits up to 2 s for its socket. To run the daemon manually, just `cmuxd` in a separate terminal.
+
 `cmux` connects to `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` (fallback `/tmp/cmux-<uid>/cmux/`), lists existing sessions, and hydrates the sidebar. New sessions you spawn (`Ctrl+A n`) go through the daemon. Quitting `cmux` (`Ctrl+Q`) sends `Detach { keep_session: true }` for every session — `cmuxd` keeps them alive.
+
+### Visual cues
+
+- Title bar shows a green `cmuxd` chip whenever the TUI is daemon-backed; dim `local` text otherwise.
+- If `cmuxd` dies mid-session, the TUI dims, shows a centered "Daemon disconnected" modal, and exits on any keypress. Sessions remain on disk for the next `cmux --connect`.
 
 ### `cmux ctl` admin commands
 
