@@ -8,6 +8,18 @@
 //!   clients as `FrameDelta` events
 //! - a `watch::Sender<SessionInfo>` that publishes status changes
 //!
+//! ## Lock order
+//!
+//! When more than one lock must be held simultaneously, acquire in this order
+//! to keep the daemon deadlock-free:
+//!
+//!   `term`  >  `byte_ring`  >  `size`  >  `info_tx` (`watch::Sender`)  >  `master`
+//!
+//! Broadcast and atomic primitives (`bytes_tx`, `alive`, `last_active_ms`,
+//! `dirty`) are non-blocking and may be touched at any point. The reader
+//! thread is the only writer for `term` + `byte_ring`; everything else only
+//! reads from them, which keeps contention bounded to short critical sections.
+//!
 //! See `DAEMON_PLAN.md` §7.
 
 use std::collections::VecDeque;
@@ -150,42 +162,9 @@ impl Session {
             cmd.arg(rid);
         }
         cmd.cwd(&cwd);
-        const STRIP: &[&str] = &[
-            "TERM_PROGRAM",
-            "TERM_PROGRAM_VERSION",
-            "COLORTERM",
-            "TMUX",
-            "TMUX_PANE",
-            "WT_SESSION",
-            "WT_PROFILE_ID",
-            "KITTY_WINDOW_ID",
-            "KITTY_INSTALLATION_DIR",
-            "KITTY_PID",
-            "KITTY_PUBLIC_KEY",
-            "ITERM_SESSION_ID",
-            "ITERM_PROFILE",
-            "LC_TERMINAL",
-            "LC_TERMINAL_VERSION",
-            "ZELLIJ",
-            "ZELLIJ_SESSION_NAME",
-            "ZELLIJ_PANE_ID",
-            "VTE_VERSION",
-            "ALACRITTY_LOG",
-            "ALACRITTY_SOCKET",
-            "ALACRITTY_WINDOW_ID",
-            "GHOSTTY_RESOURCES_DIR",
-            "WEZTERM_PANE",
-            "WEZTERM_UNIX_SOCKET",
-            "WEZTERM_EXECUTABLE",
-        ];
-        for (k, v) in std::env::vars() {
-            if STRIP.iter().any(|name| *name == k.as_str()) {
-                continue;
-            }
+        for (k, v) in cmux_proto::claude_spawn_env() {
             cmd.env(k, v);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
 
         let child = pair.slave.spawn_command(cmd).context("spawn claude")?;
         let killer = child.clone_killer();

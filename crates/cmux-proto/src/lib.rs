@@ -11,6 +11,55 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Environment variables exported by outer terminals that misadvertise the
+/// host capabilities to claude. cmux IS the terminal claude sees; strip these
+/// so claude doesn't try kitty-graphics / iTerm imgcat / tmux-passthrough
+/// escapes that the alacritty parser silently drops. Shared between cmux (local
+/// PTY) and cmuxd (daemon PTY) so the spawn environment matches byte-for-byte.
+pub const TERMINAL_ENV_STRIP: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "COLORTERM",
+    "TMUX",
+    "TMUX_PANE",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "KITTY_WINDOW_ID",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+    "VTE_VERSION",
+    "ALACRITTY_LOG",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "GHOSTTY_RESOURCES_DIR",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_EXECUTABLE",
+];
+
+/// Apply [`TERMINAL_ENV_STRIP`] to the current process environment and overlay
+/// canonical TERM + COLORTERM. Returns the (key, value) pairs callers should
+/// install on their spawn command — both `portable-pty` and `std::process`
+/// expose an `env(k, v)` method so this helper stays framework-agnostic.
+pub fn claude_spawn_env() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| !TERMINAL_ENV_STRIP.iter().any(|name| *name == k.as_str()))
+        .collect();
+    // Overwrite any TERM/COLORTERM that survived (some shells preset these).
+    out.retain(|(k, _)| k != "TERM" && k != "COLORTERM");
+    out.push(("TERM".into(), "xterm-256color".into()));
+    out.push(("COLORTERM".into(), "truecolor".into()));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Shared value types
 // ---------------------------------------------------------------------------

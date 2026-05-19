@@ -31,39 +31,6 @@ const PROMPT_NEEDLES: &[&str] = &[
     "esc to cancel",
 ];
 
-/// Environment variables exported by outer terminals that misadvertise the
-/// host capabilities to claude. cmux IS the terminal claude sees; strip these
-/// so claude doesn't try kitty-graphics / iTerm imgcat / tmux-passthrough
-/// escapes that the alacritty parser silently drops.
-pub const TERMINAL_ENV_STRIP: &[&str] = &[
-    "TERM_PROGRAM",
-    "TERM_PROGRAM_VERSION",
-    "COLORTERM",
-    "TMUX",
-    "TMUX_PANE",
-    "WT_SESSION",
-    "WT_PROFILE_ID",
-    "KITTY_WINDOW_ID",
-    "KITTY_INSTALLATION_DIR",
-    "KITTY_PID",
-    "KITTY_PUBLIC_KEY",
-    "ITERM_SESSION_ID",
-    "ITERM_PROFILE",
-    "LC_TERMINAL",
-    "LC_TERMINAL_VERSION",
-    "ZELLIJ",
-    "ZELLIJ_SESSION_NAME",
-    "ZELLIJ_PANE_ID",
-    "VTE_VERSION",
-    "ALACRITTY_LOG",
-    "ALACRITTY_SOCKET",
-    "ALACRITTY_WINDOW_ID",
-    "GHOSTTY_RESOURCES_DIR",
-    "WEZTERM_PANE",
-    "WEZTERM_UNIX_SOCKET",
-    "WEZTERM_EXECUTABLE",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClaudeStatus {
     #[default]
@@ -278,14 +245,9 @@ impl Session {
             cmd.arg(id);
         }
         cmd.cwd(&cwd);
-        for (k, v) in std::env::vars() {
-            if TERMINAL_ENV_STRIP.iter().any(|name| *name == k.as_str()) {
-                continue;
-            }
+        for (k, v) in cmux_proto::claude_spawn_env() {
             cmd.env(k, v);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
 
         let child = pair.slave.spawn_command(cmd).context("spawn claude")?;
         let killer = child.clone_killer();

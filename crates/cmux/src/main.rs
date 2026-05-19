@@ -69,41 +69,50 @@ fn run_with_daemon(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -
         let _ = app.adopt_daemon_session(info, &handle, main_rows, main_cols);
     }
 
-    // Normal main loop, but on Ctrl+Q (handled via should_quit) we detach
-    // daemon sessions instead of killing them.
-    drive_main_loop(terminal, app)
+    // Same loop as local mode; teardown branches on app.daemon to detach
+    // instead of killing sessions.
+    event_loop(terminal, app)
 }
 
-fn drive_main_loop(
+/// Drive the TUI until quit. Single loop body shared by local-mode (`run`)
+/// and daemon-mode (`run_with_daemon`); branches on `app.daemon` only at
+/// teardown.
+fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut app: App,
 ) -> Result<()> {
+    const HEARTBEAT_MS: u64 = 250;
+    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
+
     let debug = util::debug_enabled();
     let mut tile_sizes: ui::TileSizes = Vec::new();
     let mut last_draw_ms: u64 = 0;
     let mut last_persist_ms: u64 = util::now_ms();
-    const HEARTBEAT_MS: u64 = 250;
-    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
+
     loop {
         app.reap_dead();
         let now = util::now_ms();
+
         if app.persist_dirty && now.saturating_sub(last_persist_ms) >= PERSIST_DEBOUNCE_MS {
             flush_persist(&app);
             app.persist_dirty = false;
             last_persist_ms = now;
         }
+
         let any_session_dirty = app
             .sessions
             .iter()
             .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
-        let elapsed = now.saturating_sub(last_draw_ms);
         if let Some(t) = &app.toast
             && now >= t.expires_at_ms
         {
             app.toast = None;
             app.needs_redraw = true;
         }
-        if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
+        if app.needs_redraw
+            || any_session_dirty
+            || now.saturating_sub(last_draw_ms) >= HEARTBEAT_MS
+        {
             app.render_tick = app.render_tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
             for (idx, rows, cols) in tile_sizes.drain(..) {
@@ -116,31 +125,7 @@ fn drive_main_loop(
         }
 
         if event::poll(Duration::from_millis(40))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if debug {
-                        log_key(&key, app.prefix_pending);
-                    }
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
-                    handle_key(&mut app, key)?;
-                    app.needs_redraw = true;
-                }
-                Event::Resize(cols, rows) => {
-                    app.term_size = (rows, cols);
-                    resize_all(&mut app);
-                    app.needs_redraw = true;
-                }
-                Event::Mouse(me) => {
-                    handle_mouse(&mut app, me);
-                }
-                Event::Paste(text) => {
-                    handle_paste(&mut app, &text);
-                    app.needs_redraw = true;
-                }
-                _ => {}
-            }
+            dispatch_event(&mut app, event::read()?, debug)?;
         }
 
         if app.should_quit {
@@ -149,6 +134,7 @@ fn drive_main_loop(
 
         // Daemon dropped: flip into the daemon-lost modal. Renders next frame
         // via ui::draw; any keypress exits via handle_key's daemon-lost path.
+        // No-op in local mode (`app.daemon` is None).
         if !app.daemon_lost
             && let Some(d) = &app.daemon
             && !d.alive.load(std::sync::atomic::Ordering::SeqCst)
@@ -165,6 +151,33 @@ fn drive_main_loop(
     }
     if app.persist_dirty {
         flush_persist(&app);
+    }
+    Ok(())
+}
+
+fn dispatch_event(app: &mut App, ev: Event, debug: bool) -> Result<()> {
+    match ev {
+        Event::Key(key) => {
+            if debug {
+                log_key(&key, app.prefix_pending);
+            }
+            if key.kind == KeyEventKind::Release {
+                return Ok(());
+            }
+            handle_key(app, key)?;
+            app.needs_redraw = true;
+        }
+        Event::Resize(cols, rows) => {
+            app.term_size = (rows, cols);
+            resize_all(app);
+            app.needs_redraw = true;
+        }
+        Event::Mouse(me) => handle_mouse(app, me),
+        Event::Paste(text) => {
+            handle_paste(app, &text);
+            app.needs_redraw = true;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -326,80 +339,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     }
     flush_persist(&app);
 
-    let debug = util::debug_enabled();
-    let mut tile_sizes: ui::TileSizes = Vec::new();
-    let mut last_draw_ms: u64 = 0;
-    let mut last_persist_ms: u64 = util::now_ms();
-    const HEARTBEAT_MS: u64 = 250;
-    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
-    loop {
-        app.reap_dead();
-        let now = util::now_ms();
-        if app.persist_dirty && now.saturating_sub(last_persist_ms) >= PERSIST_DEBOUNCE_MS {
-            flush_persist(&app);
-            app.persist_dirty = false;
-            last_persist_ms = now;
-        }
-
-        let any_session_dirty = app
-            .sessions
-            .iter()
-            .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
-        let elapsed = now.saturating_sub(last_draw_ms);
-        if let Some(t) = &app.toast
-            && now >= t.expires_at_ms
-        {
-            app.toast = None;
-            app.needs_redraw = true;
-        }
-        if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
-            app.render_tick = app.render_tick.wrapping_add(1);
-            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
-            for (idx, rows, cols) in tile_sizes.drain(..) {
-                if let Some(s) = app.sessions.get_mut(idx) {
-                    let _ = s.resize(rows.max(2), cols.max(4));
-                }
-            }
-            app.needs_redraw = false;
-            last_draw_ms = now;
-        }
-
-        if event::poll(Duration::from_millis(40))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if debug {
-                        log_key(&key, app.prefix_pending);
-                    }
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
-                    handle_key(&mut app, key)?;
-                    app.needs_redraw = true;
-                }
-                Event::Resize(cols, rows) => {
-                    app.term_size = (rows, cols);
-                    resize_all(&mut app);
-                    app.needs_redraw = true;
-                }
-                Event::Mouse(me) => {
-                    handle_mouse(&mut app, me);
-                }
-                Event::Paste(text) => {
-                    handle_paste(&mut app, &text);
-                    app.needs_redraw = true;
-                }
-                _ => {}
-            }
-        }
-
-        if app.should_quit {
-            break;
-        }
-    }
-    if app.persist_dirty {
-        flush_persist(&app);
-    }
-    Ok(())
+    event_loop(terminal, app)
 }
 
 fn apply_scroll_lines(app: &mut App, delta: i32) {
@@ -424,111 +364,104 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         && me.row < tile.y + tile.height;
 
     match me.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(s) = app.sessions.get_mut(app.focus) {
-                let had_selection = s.selection.is_some();
-                s.selection = None;
-                if inside {
-                    let row = me.row - tile.y;
-                    let col = me.column - tile.x;
-                    s.mouse_down_at = Some((row, col));
-                } else {
-                    s.mouse_down_at = None;
-                }
-                if had_selection {
-                    app.needs_redraw = true;
-                }
-            }
-        }
-        MouseEventKind::Drag(MouseButton::Left) if inside => {
-            if let Some(s) = app.sessions.get_mut(app.focus)
-                && let Some(anchor) = s.mouse_down_at
-            {
-                let row = me.row - tile.y;
-                let col = me.column - tile.x;
-                let sel = s.selection.get_or_insert_with(|| {
-                    term_render::TileSelection::new(anchor.0, anchor.1)
-                });
-                sel.anchor = anchor;
-                sel.tip = (row, col);
-                app.needs_redraw = true;
-            }
-        }
+        MouseEventKind::Down(MouseButton::Left) => mouse_press(app, me, tile, inside),
+        MouseEventKind::Drag(MouseButton::Left) if inside => mouse_drag(app, me, tile),
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
-            use alacritty_terminal::term::TermMode;
-            const WHEEL_REPEAT: usize = 1;
-            let up = matches!(me.kind, MouseEventKind::ScrollUp);
-            if matches!(app.mode, Mode::Scrollback(_)) {
-                apply_scroll_lines(app, if up { 1 } else { -1 });
-            } else if let Some(s) = app.sessions.get_mut(app.focus) {
-                let mode = s.parser.lock().ok().map(|p| *p.term.mode());
-                let col = me.column.saturating_sub(tile.x) + 1;
-                let row = me.row.saturating_sub(tile.y) + 1;
-                let one: Vec<u8> = match mode {
-                    Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
-                        let btn = if up { 64 } else { 65 };
-                        format!("\x1b[<{};{};{}M", btn, col, row).into_bytes()
-                    }
-                    Some(m)
-                        if m.intersects(
-                            TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION,
-                        ) =>
-                    {
-                        let btn = if up { 64u8 } else { 65u8 };
-                        vec![
-                            0x1b,
-                            b'[',
-                            b'M',
-                            btn + 32,
-                            (col as u8).saturating_add(32),
-                            (row as u8).saturating_add(32),
-                        ]
-                    }
-                    Some(m)
-                        if m.contains(TermMode::ALT_SCREEN)
-                            && m.contains(TermMode::ALTERNATE_SCROLL) =>
-                    {
-                        if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
-                    }
-                    _ => {
-                        if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
-                    }
-                };
-                let mut buf: Vec<u8> = Vec::with_capacity(one.len() * WHEEL_REPEAT);
-                for _ in 0..WHEEL_REPEAT {
-                    buf.extend_from_slice(&one);
-                }
-                let _ = s.write(&buf);
-            }
+            mouse_wheel(app, me, tile)
         }
-        MouseEventKind::Up(MouseButton::Left) => {
-            if let Some(s) = app.sessions.get_mut(app.focus) {
-                s.mouse_down_at = None;
-            }
-            let in_scrollback = matches!(app.mode, Mode::Scrollback(_));
-            let Some(s) = app.sessions.get(app.focus) else { return };
-            let Some(sel) = s.selection else { return };
-            let text = if in_scrollback
-                && let Some(sb) = &s.scrollback
-            {
-                term_render::extract_selection(&sb.term, sel)
-            } else if let Ok(p) = s.parser.lock() {
-                term_render::extract_selection(&p.term, sel)
-            } else {
-                return;
-            };
-            if !text.trim().is_empty() {
-                let count = text.chars().count();
-                emit_osc52(&text);
-                app.toast = Some(app::Toast {
-                    text: format!("copied ✓ {} chars", count),
-                    expires_at_ms: util::now_ms() + 1400,
-                });
-                app.needs_redraw = true;
-            }
-        }
+        MouseEventKind::Up(MouseButton::Left) => mouse_release(app),
         _ => {}
     }
+}
+
+fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, inside: bool) {
+    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let had_selection = s.selection.is_some();
+    s.selection = None;
+    s.mouse_down_at = inside.then(|| (me.row - tile.y, me.column - tile.x));
+    if had_selection {
+        app.needs_redraw = true;
+    }
+}
+
+fn mouse_drag(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
+    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let Some(anchor) = s.mouse_down_at else { return };
+    let row = me.row - tile.y;
+    let col = me.column - tile.x;
+    let sel = s
+        .selection
+        .get_or_insert_with(|| term_render::TileSelection::new(anchor.0, anchor.1));
+    sel.anchor = anchor;
+    sel.tip = (row, col);
+    app.needs_redraw = true;
+}
+
+fn mouse_wheel(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
+    use alacritty_terminal::term::TermMode;
+    let up = matches!(me.kind, MouseEventKind::ScrollUp);
+
+    if matches!(app.mode, Mode::Scrollback(_)) {
+        apply_scroll_lines(app, if up { 1 } else { -1 });
+        return;
+    }
+
+    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let mode = s.parser.lock().ok().map(|p| *p.term.mode());
+    let col = me.column.saturating_sub(tile.x) + 1;
+    let row = me.row.saturating_sub(tile.y) + 1;
+    let seq: Vec<u8> = match mode {
+        Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
+            let btn = if up { 64 } else { 65 };
+            format!("\x1b[<{};{};{}M", btn, col, row).into_bytes()
+        }
+        Some(m) if m.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION) => {
+            let btn = if up { 64u8 } else { 65u8 };
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                btn + 32,
+                (col as u8).saturating_add(32),
+                (row as u8).saturating_add(32),
+            ]
+        }
+        Some(m) if m.contains(TermMode::ALT_SCREEN) && m.contains(TermMode::ALTERNATE_SCROLL) => {
+            if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
+        }
+        _ => {
+            if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
+        }
+    };
+    let _ = s.write(&seq);
+}
+
+fn mouse_release(app: &mut App) {
+    if let Some(s) = app.sessions.get_mut(app.focus) {
+        s.mouse_down_at = None;
+    }
+    let in_scrollback = matches!(app.mode, Mode::Scrollback(_));
+    let Some(s) = app.sessions.get(app.focus) else { return };
+    let Some(sel) = s.selection else { return };
+    let text = if in_scrollback
+        && let Some(sb) = &s.scrollback
+    {
+        term_render::extract_selection(&sb.term, sel)
+    } else if let Ok(p) = s.parser.lock() {
+        term_render::extract_selection(&p.term, sel)
+    } else {
+        return;
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+    let count = text.chars().count();
+    emit_osc52(&text);
+    app.toast = Some(app::Toast {
+        text: format!("copied ✓ {} chars", count),
+        expires_at_ms: util::now_ms() + 1400,
+    });
+    app.needs_redraw = true;
 }
 
 fn handle_paste(app: &mut App, text: &str) {
