@@ -1,6 +1,6 @@
 mod app;
 mod client;
-mod daemon_app;
+mod connect_mode;
 mod keys;
 mod persist;
 mod session;
@@ -29,17 +29,131 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 
-fn run_connect_mode(args: &[String]) -> Result<()> {
+fn run_connect_mode(_args: &[String]) -> Result<()> {
+    install_panic_hook();
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    {
+        use std::io::Write;
+        let mut out = stdout();
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        let _ = out.flush();
+    }
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+    let res = run_with_daemon(&mut terminal);
+    {
+        use std::io::Write;
+        let mut out = stdout();
+        let _ = out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+    }
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    res
+}
+
+fn run_with_daemon(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let path = client::socket_path()
         .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
-    let cwd = args
-        .iter()
-        .position(|a| a == "--cwd")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    daemon_app::run(&path, cwd)
+    let (handle, infos) = connect_mode::connect(&path)?;
+    let size = terminal.size()?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut app = App::new(cwd, (size.height, size.width));
+    app.daemon = Some(handle.clone());
+
+    // Adopt every existing daemon session into the sidebar.
+    let (term_rows, term_cols) = app.term_size;
+    let main_cols = term_cols.saturating_sub(32).saturating_sub(2).max(10);
+    let main_rows = term_rows.saturating_sub(3).max(4);
+    for info in infos {
+        let _ = app.adopt_daemon_session(info, &handle, main_rows, main_cols);
+    }
+
+    // Normal main loop, but on Ctrl+Q (handled via should_quit) we detach
+    // daemon sessions instead of killing them.
+    drive_main_loop(terminal, app)
+}
+
+fn drive_main_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut app: App,
+) -> Result<()> {
+    let debug = util::debug_enabled();
+    let mut tile_sizes: ui::TileSizes = Vec::new();
+    let mut last_draw_ms: u64 = 0;
+    let mut last_persist_ms: u64 = util::now_ms();
+    const HEARTBEAT_MS: u64 = 250;
+    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
+    loop {
+        app.reap_dead();
+        let now = util::now_ms();
+        if app.persist_dirty && now.saturating_sub(last_persist_ms) >= PERSIST_DEBOUNCE_MS {
+            flush_persist(&app);
+            app.persist_dirty = false;
+            last_persist_ms = now;
+        }
+        let any_session_dirty = app
+            .sessions
+            .iter()
+            .any(|s| s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed));
+        let elapsed = now.saturating_sub(last_draw_ms);
+        if let Some(t) = &app.toast
+            && now >= t.expires_at_ms
+        {
+            app.toast = None;
+            app.needs_redraw = true;
+        }
+        if app.needs_redraw || any_session_dirty || elapsed >= HEARTBEAT_MS {
+            app.render_tick = app.render_tick.wrapping_add(1);
+            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
+            for (idx, rows, cols) in tile_sizes.drain(..) {
+                if let Some(s) = app.sessions.get_mut(idx) {
+                    let _ = s.resize(rows.max(2), cols.max(4));
+                }
+            }
+            app.needs_redraw = false;
+            last_draw_ms = now;
+        }
+
+        if event::poll(Duration::from_millis(40))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if debug {
+                        log_key(&key, app.prefix_pending);
+                    }
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+                    handle_key(&mut app, key)?;
+                    app.needs_redraw = true;
+                }
+                Event::Resize(cols, rows) => {
+                    app.term_size = (rows, cols);
+                    resize_all(&mut app);
+                    app.needs_redraw = true;
+                }
+                Event::Mouse(me) => {
+                    handle_mouse(&mut app, me);
+                }
+                _ => {}
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    // Daemon-mode: detach instead of killing.
+    if app.daemon.is_some() {
+        for s in app.sessions.iter_mut() {
+            s.detach_keep();
+        }
+    }
+    if app.persist_dirty {
+        flush_persist(&app);
+    }
+    Ok(())
 }
 
 fn run_ctl(args: &[String]) -> Result<()> {

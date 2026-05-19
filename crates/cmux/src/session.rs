@@ -4,11 +4,13 @@ use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context, Result};
+use cmux_proto::Request as ProtoRequest;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -154,6 +156,29 @@ impl TerminalState {
     }
 }
 
+/// Per-session daemon hooks, shared with the daemon-events reader thread.
+pub struct DaemonSlot {
+    pub parser: Arc<Mutex<TerminalState>>,
+    pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
+    pub dirty: Arc<AtomicBool>,
+    pub alive: Arc<AtomicBool>,
+    pub last_active_ms: Arc<AtomicU64>,
+}
+
+enum Backend {
+    Local {
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        child: Box<dyn Child + Send + Sync>,
+        killer: Box<dyn ChildKiller + Send + Sync>,
+        _reader_thread: JoinHandle<()>,
+    },
+    Daemon {
+        remote_id: u64,
+        req_tx: mpsc::Sender<ProtoRequest>,
+    },
+}
+
 pub struct Session {
     pub id: u64,
     pub label: String,
@@ -176,11 +201,7 @@ pub struct Session {
     pub mouse_down_at: Option<(u16, u16)>,
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
-    _reader_thread: JoinHandle<()>,
+    backend: Backend,
 }
 
 impl Session {
@@ -285,12 +306,76 @@ impl Session {
             mouse_down_at: None,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
-            master: pair.master,
-            writer,
-            child,
-            killer,
-            _reader_thread: reader_thread,
+            backend: Backend::Local {
+                master: pair.master,
+                writer,
+                child,
+                killer,
+                _reader_thread: reader_thread,
+            },
         })
+    }
+
+    /// Build a daemon-backed Session. The caller is responsible for arranging
+    /// a reader thread that feeds FrameDelta bytes from the daemon into the
+    /// returned `parser`/`byte_ring` via the returned `DaemonSlot`, and for
+    /// servicing `req_tx` to ship Requests to the daemon.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_daemon(
+        id: u64,
+        label: String,
+        cwd: PathBuf,
+        dangerous: bool,
+        resume_id: Option<String>,
+        rows: u16,
+        cols: u16,
+        pid: Option<u32>,
+        remote_id: u64,
+        req_tx: mpsc::Sender<ProtoRequest>,
+    ) -> (Self, DaemonSlot) {
+        let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
+        let byte_ring: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
+        let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
+        let slot = DaemonSlot {
+            parser: parser.clone(),
+            byte_ring: byte_ring.clone(),
+            dirty: dirty.clone(),
+            alive: alive.clone(),
+            last_active_ms: last_active_ms.clone(),
+        };
+        let s = Self {
+            id,
+            label,
+            cwd,
+            dangerous,
+            resume_id,
+            parser,
+            size: (rows, cols),
+            alive,
+            last_active_ms,
+            dirty,
+            byte_ring,
+            scrollback: None,
+            pid,
+            claude_status: ClaudeStatus::Unknown,
+            claude_name: None,
+            permission_pending: false,
+            manually_renamed: false,
+            selection: None,
+            mouse_down_at: None,
+            last_status_check_ms: 0,
+            last_perm_check_active_ms: 0,
+            backend: Backend::Daemon { remote_id, req_tx },
+        };
+        (s, slot)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_daemon_backed(&self) -> bool {
+        matches!(self.backend, Backend::Daemon { .. })
     }
 
     pub fn poll_status(&mut self) {
@@ -353,8 +438,20 @@ impl Session {
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
+        match &mut self.backend {
+            Backend::Local { writer, .. } => {
+                writer.write_all(bytes)?;
+                writer.flush()?;
+            }
+            Backend::Daemon { remote_id, req_tx } => {
+                req_tx
+                    .send(ProtoRequest::Input {
+                        session_id: *remote_id,
+                        bytes: bytes.to_vec(),
+                    })
+                    .map_err(|_| anyhow::anyhow!("daemon channel closed"))?;
+            }
+        }
         Ok(())
     }
 
@@ -363,9 +460,18 @@ impl Session {
             return Ok(());
         }
         self.size = (rows, cols);
-        self.master
-            .resize(pty_size(rows, cols))
-            .context("resize pty")?;
+        match &mut self.backend {
+            Backend::Local { master, .. } => {
+                master.resize(pty_size(rows, cols)).context("resize pty")?;
+            }
+            Backend::Daemon { remote_id, req_tx } => {
+                let _ = req_tx.send(ProtoRequest::Resize {
+                    session_id: *remote_id,
+                    rows,
+                    cols,
+                });
+            }
+        }
         if let Ok(mut p) = self.parser.lock() {
             p.resize(rows, cols);
         }
@@ -377,23 +483,56 @@ impl Session {
         if !self.alive.load(Ordering::SeqCst) {
             return false;
         }
-        match self.child.try_wait() {
-            Ok(Some(_)) => {
-                self.alive.store(false, Ordering::SeqCst);
-                false
-            }
-            _ => true,
+        match &mut self.backend {
+            Backend::Local { child, .. } => match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.alive.store(false, Ordering::SeqCst);
+                    false
+                }
+                _ => true,
+            },
+            Backend::Daemon { .. } => true,
         }
     }
 
+    /// Hard-kill: ends the underlying claude process. For daemon mode this
+    /// sends `Detach { keep_session: false }`.
+    #[allow(dead_code)]
     pub fn kill(&mut self) {
-        let _ = self.killer.kill();
+        match &mut self.backend {
+            Backend::Local { killer, .. } => {
+                let _ = killer.kill();
+            }
+            Backend::Daemon { remote_id, req_tx } => {
+                let _ = req_tx.send(ProtoRequest::Detach {
+                    session_id: *remote_id,
+                    keep_session: false,
+                });
+            }
+        }
         self.alive.store(false, Ordering::SeqCst);
+    }
+
+    /// Detach a daemon-backed session while keeping it alive on the daemon.
+    /// No-op for local sessions.
+    pub fn detach_keep(&mut self) {
+        if let Backend::Daemon { remote_id, req_tx } = &mut self.backend {
+            let _ = req_tx.send(ProtoRequest::Detach {
+                session_id: *remote_id,
+                keep_session: true,
+            });
+        }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.kill();
+        // Only the local backend forcibly kills the child on drop. Daemon
+        // backend leaves the session to be managed by explicit kill() /
+        // detach_keep() calls.
+        if let Backend::Local { killer, .. } = &mut self.backend {
+            let _ = killer.kill();
+            self.alive.store(false, Ordering::SeqCst);
+        }
     }
 }

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use ratatui::layout::Rect;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::connect_mode::{DaemonHandle, SpawnMailbox};
 use crate::session::Session;
 
 pub enum Mode {
@@ -170,6 +172,7 @@ pub struct App {
     pub last_tile_area: Option<Rect>,
     pub render_tick: u64,
     pub toast: Option<Toast>,
+    pub daemon: Option<Arc<DaemonHandle>>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +199,7 @@ impl App {
             last_tile_area: None,
             render_tick: 0,
             toast: None,
+            daemon: None,
         }
     }
 
@@ -215,9 +219,87 @@ impl App {
         let (rows, cols) = self.tile_size_for_new();
         let id = self.next_id;
         self.next_id += 1;
-        let session = Session::spawn(id, label, cwd, dangerous, rows, cols, resume)?;
+
+        let session = if let Some(daemon) = self.daemon.clone() {
+            // Daemon-backed spawn: queue a mailbox, send Request::SpawnSession,
+            // block on the mailbox for the SessionSpawned info.
+            let mb = SpawnMailbox::new();
+            daemon
+                .pending_spawns
+                .lock()
+                .unwrap()
+                .push_back(mb.clone());
+            daemon.request(cmux_proto::Request::SpawnSession {
+                cwd: cwd.clone(),
+                dangerous,
+                resume_id: resume.clone(),
+                label: Some(label.clone()),
+            })?;
+            let info = mb
+                .wait(5_000)
+                .ok_or_else(|| anyhow::anyhow!("daemon did not respond to SpawnSession"))?;
+            let (sess, slot) = Session::new_daemon(
+                id,
+                info.label,
+                info.cwd,
+                info.dangerous,
+                info.resume_id,
+                rows,
+                cols,
+                None,
+                info.id,
+                daemon.req_tx.clone(),
+            );
+            daemon.register_slot(info.id, slot);
+            // Subscribe so FrameDelta starts flowing for this session.
+            daemon.request(cmux_proto::Request::Subscribe { session_id: info.id })?;
+            // Push initial resize so daemon sizes claude to our tile.
+            daemon.request(cmux_proto::Request::Resize {
+                session_id: info.id,
+                rows,
+                cols,
+            })?;
+            sess
+        } else {
+            Session::spawn(id, label, cwd, dangerous, rows, cols, resume)?
+        };
+
         self.sessions.push(session);
         self.focus = self.sessions.len() - 1;
+        Ok(())
+    }
+
+    /// Construct a daemon-backed Session for an existing daemon session
+    /// (returned by `ListSessions` on connect). Subscribes for FrameDelta
+    /// streaming and queues an Attach to drain the replay ring.
+    pub fn adopt_daemon_session(
+        &mut self,
+        info: cmux_proto::SessionInfo,
+        daemon: &Arc<DaemonHandle>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let (sess, slot) = Session::new_daemon(
+            id,
+            info.label,
+            info.cwd,
+            info.dangerous,
+            info.resume_id,
+            rows,
+            cols,
+            None,
+            info.id,
+            daemon.req_tx.clone(),
+        );
+        daemon.register_slot(info.id, slot);
+        daemon.request(cmux_proto::Request::Subscribe { session_id: info.id })?;
+        daemon.request(cmux_proto::Request::Attach {
+            session_id: info.id,
+            want_history: true,
+        })?;
+        self.sessions.push(sess);
         Ok(())
     }
 
