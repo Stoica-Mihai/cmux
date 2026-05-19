@@ -142,9 +142,22 @@ fn drive_main_loop(
         if app.should_quit {
             break;
         }
+
+        // Daemon dropped: exit cleanly. Show a brief toast first.
+        if let Some(d) = &app.daemon
+            && !d.alive.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            app.toast = Some(app::Toast {
+                text: "cmuxd connection lost".to_string(),
+                expires_at_ms: util::now_ms() + 1500,
+            });
+            app.needs_redraw = true;
+            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
+            std::thread::sleep(Duration::from_millis(900));
+            break;
+        }
     }
 
-    // Daemon-mode: detach instead of killing.
     if app.daemon.is_some() {
         for s in app.sessions.iter_mut() {
             s.detach_keep();

@@ -12,7 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar};
 
@@ -113,6 +113,7 @@ pub struct DaemonHandle {
     pub req_tx: mpsc::Sender<Request>,
     pub slots: Arc<Mutex<HashMap<u64, Arc<DaemonSlot>>>>,
     pub pending_spawns: Arc<Mutex<VecDeque<Arc<SpawnMailbox>>>>,
+    pub alive: Arc<AtomicBool>,
 }
 
 impl DaemonHandle {
@@ -148,6 +149,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
     let (req_tx, req_rx) = mpsc::channel::<Request>();
     let slots: Arc<Mutex<HashMap<u64, Arc<DaemonSlot>>>> = Default::default();
     let pending_spawns: Arc<Mutex<VecDeque<Arc<SpawnMailbox>>>> = Default::default();
+    let alive = Arc::new(AtomicBool::new(true));
 
     // Writer thread: drain req_rx into the daemon.
     std::thread::Builder::new()
@@ -163,6 +165,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
     // Reader thread: distribute events into per-session slots + spawn mailboxes.
     let slots_for_reader = slots.clone();
     let pending_for_reader = pending_spawns.clone();
+    let alive_for_reader = alive.clone();
     std::thread::Builder::new()
         .name("cmuxd-reader".into())
         .spawn(move || {
@@ -204,7 +207,8 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
                     _ => {}
                 }
             }
-            // Reader done: mark all slots dead so the App reaps them.
+            // Reader done: mark daemon dead + cascade to all slots.
+            alive_for_reader.store(false, Ordering::SeqCst);
             if let Ok(m) = slots_for_reader.lock() {
                 for slot in m.values() {
                     slot.alive.store(false, Ordering::SeqCst);
@@ -218,6 +222,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
             req_tx,
             slots,
             pending_spawns,
+            alive,
         }),
         infos,
     ))
