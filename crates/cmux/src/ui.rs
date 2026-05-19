@@ -79,18 +79,12 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         theme::FG_DIM
     };
-    let focus_label = app
-        .sessions
-        .get(app.focus)
-        .map(|s| format!("[{}] {}", app.focus + 1, s.label))
-        .unwrap_or_else(|| "—".to_string());
     let pos = if app.sessions.is_empty() {
         String::from("0/0")
     } else {
         format!("{}/{}", app.focus + 1, app.sessions.len())
     };
     let dim = Style::default().fg(theme::FG_DIM);
-    let value = Style::default().fg(theme::FG);
     let mut left_spans = vec![
         Span::styled(
             " ◆ cmux ",
@@ -117,9 +111,6 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
                 .fg(theme::ACCENT_YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", dim),
-        Span::styled("focus ", dim),
-        Span::styled(focus_label, value),
     ]);
 
     let clock = current_clock_string();
