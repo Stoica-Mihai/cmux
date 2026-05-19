@@ -1,0 +1,14 @@
+[package]
+name = "cmuxd"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cmuxd"
+path = "src/main.rs"
+
+[dependencies]
+cmux-proto = { path = "../cmux-proto" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

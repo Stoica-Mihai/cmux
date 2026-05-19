@@ -1,9 +1,16 @@
-[package]
-name = "cmux"
+[workspace]
+resolver = "2"
+members = [
+    "crates/cmux",
+    "crates/cmux-proto",
+    "crates/cmuxd",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1.0.102"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
