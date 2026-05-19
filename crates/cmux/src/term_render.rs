@@ -232,7 +232,16 @@ impl<'a> Widget for TermWidget<'a> {
             let x = area.x + col as u16;
             let y = area.y + row as u16;
             if let Some(buf_cell) = buf.cell_mut((x, y)) {
-                buf_cell.set_char(ch);
+                if let Some(extras) = cell.zerowidth() {
+                    let mut sym = String::with_capacity(1 + extras.len());
+                    sym.push(ch);
+                    for c in extras {
+                        sym.push(*c);
+                    }
+                    buf_cell.set_symbol(&sym);
+                } else {
+                    buf_cell.set_char(ch);
+                }
                 buf_cell.set_style(style);
             }
         }

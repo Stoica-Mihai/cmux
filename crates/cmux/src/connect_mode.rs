@@ -25,6 +25,56 @@ use crate::util::now_ms;
 
 const RING_CAP: usize = 1_048_576;
 
+/// Spawn `cmuxd` in the background and wait up to ~2 s for its socket to
+/// appear. Tries the binary next to the current `cmux` first, then `cmuxd`
+/// on `$PATH`.
+fn try_spawn_daemon() -> Result<()> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        candidates.push(parent.join("cmuxd"));
+    }
+    candidates.push(std::path::PathBuf::from("cmuxd"));
+
+    let mut launched = false;
+    for cand in candidates {
+        match Command::new(&cand)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_child) => {
+                // child is intentionally let-dropped: it keeps running in
+                // background. Subsequent runs use the existing socket.
+                launched = true;
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    if !launched {
+        anyhow::bail!("could not spawn cmuxd: not in $PATH or next to cmux");
+    }
+
+    // Wait for the ready-stamp file (or socket) to appear.
+    let socket = crate::client::socket_path()
+        .ok_or_else(|| anyhow::anyhow!("no socket path"))?;
+    let ready = socket.with_file_name("cmuxd.ready");
+    let deadline = Instant::now() + Duration::from_millis(2_000);
+    while Instant::now() < deadline {
+        if ready.exists() && socket.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    anyhow::bail!("cmuxd did not become ready within 2s")
+}
+
 /// Pending spawn waiter. App pushes a `(client_id, mailbox)` here before
 /// sending `SpawnSession`, then blocks on `mailbox.wait_for_info()`. The
 /// events reader thread moves matching `SessionSpawned` events into the
@@ -81,7 +131,13 @@ impl DaemonHandle {
 /// return `(DaemonHandle, initial_session_infos)`. The handle's reader thread
 /// is already running; the writer thread drains `req_tx` into the socket.
 pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
-    let mut client = Client::connect(path).context("connect cmuxd")?;
+    let mut client = match Client::connect(path) {
+        Ok(c) => c,
+        Err(_) => {
+            try_spawn_daemon()?;
+            Client::connect(path).context("connect cmuxd after auto-spawn")?
+        }
+    };
     client.send(&Request::ListSessions)?;
     let infos = match client.recv()? {
         Event::SessionList { sessions } => sessions,

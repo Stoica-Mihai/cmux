@@ -209,8 +209,6 @@ Workspace: `alacritty_terminal` (via re-exported `vte` 0.15), `portable-pty`, `r
 
 ## Known limitations
 
-- `alacritty_terminal` parses VT-text-class sequences faithfully (full xterm SGR, OSC 8 hyperlinks, OSC 52 clipboard requests, synchronized output, bracketed paste, mouse SGR), but image-class protocols are out of scope: sixel, kitty graphics, iTerm2 inline images are silently dropped. Adding any of those requires a passthrough render path that bypasses the cell grid for the focused tile.
-- Custom renderer collapses each cell into a single ratatui buffer cell. Wide CJK chars render correctly but combining marks beyond the base char (zerowidth extras) are dropped. OSC 8 hyperlink cells render but the link itself is not emitted via OSC 8 to the outer terminal.
-- Daemon mode survives `cmux` exit. It does **not** survive `cmuxd` exit — kill the daemon and every owned PTY dies with it. Snapshot-based restore across daemon restarts is not yet shipped.
-- The TUI must auto-spawn `cmuxd` if not running — not yet implemented. For now start `cmuxd` manually before `cmux --connect`.
-- Small preview tiles (e.g. 4 sessions at 80×24 → ~38×10 each) — claude UI is not really readable at that size; preview is for "is it idle / waiting / running" awareness, then zoom in.
+- Image-class terminal protocols are out of scope: sixel, kitty graphics, iTerm2 inline images are silently dropped. Adding any of those requires a passthrough render path that bypasses the cell grid for the focused tile. Text-class sequences (xterm SGR, OSC 8 hyperlinks, OSC 52 clipboard, synchronized output, bracketed paste, mouse SGR) are parsed faithfully.
+- OSC 8 hyperlink cells render their visible text but the link itself is not re-emitted to the outer terminal — clicking won't open it.
+- Daemon mode survives `cmux` exit but does **not** survive `cmuxd` exit. Snapshot-based restore across daemon restarts is not yet shipped.
