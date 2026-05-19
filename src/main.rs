@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -30,14 +30,31 @@ use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 fn main() -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    // Minimal mouse capture: ?1000h (button press/release) + ?1002h
+    // (button-event tracking for drag) + ?1006h (SGR 1006 encoding).
+    // Skip ?1003h (any-motion) — Windows Terminal amplifies wheel
+    // events when 1003 is on, fanning a single detent into many
+    // ScrollUp/Down events.
+    {
+        use std::io::Write;
+        let mut out = stdout();
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        let _ = out.flush();
+    }
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let res = run(&mut terminal);
 
+    {
+        use std::io::Write;
+        let mut out = stdout();
+        let _ = out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        let _ = out.flush();
+    }
     disable_raw_mode()?;
-    execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(stdout(), LeaveAlternateScreen)?;
     res
 }
 
