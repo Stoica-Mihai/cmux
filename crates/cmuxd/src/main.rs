@@ -180,6 +180,19 @@ async fn wait_sigterm() {
     }
 }
 
+/// Send SIGTERM to the current process so the main loop's shutdown path runs.
+/// Used by the Shutdown request handler.
+#[allow(unsafe_code)]
+unsafe fn libc_kill_self() {
+    // raise(SIGTERM) via libc — pull in a tiny extern decl rather than a
+    // whole libc dep.
+    unsafe extern "C" {
+        fn raise(sig: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    const SIGTERM: std::ffi::c_int = 15;
+    unsafe { raise(SIGTERM) };
+}
+
 async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
     let (mut read_half, write_half) = stream.into_split();
 
@@ -421,7 +434,23 @@ async fn dispatch(
             }
         }
         Request::Shutdown => {
-            anyhow::bail!("Shutdown not yet implemented in phase 3");
+            // Kill every session and ask the daemon to exit. Sends Goodbye
+            // first so the requesting client knows it landed.
+            let _ = event_tx
+                .send(Event::Goodbye {
+                    reason: "shutdown requested".into(),
+                })
+                .await;
+            let sessions = registry.sessions.lock().await;
+            for s in sessions.values() {
+                s.kill();
+            }
+            drop(sessions);
+            // Self-signal SIGTERM so the main shutdown path runs (cleans up
+            // socket + ready file).
+            unsafe {
+                libc_kill_self();
+            }
         }
         Request::KillAll => {
             let sessions = registry.sessions.lock().await;

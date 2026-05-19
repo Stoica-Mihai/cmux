@@ -15,7 +15,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -42,8 +42,74 @@ fn run_connect_mode(args: &[String]) -> Result<()> {
     daemon_app::run(&path, cwd)
 }
 
+fn run_ctl(args: &[String]) -> Result<()> {
+    let sub = args.get(2).cloned().unwrap_or_default();
+    let path = client::socket_path()
+        .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
+    let mut c = client::Client::connect(&path).context("connect cmuxd")?;
+    match sub.as_str() {
+        "list" => {
+            c.send(&cmux_proto::Request::ListSessions)?;
+            match c.recv()? {
+                cmux_proto::Event::SessionList { sessions } => {
+                    if sessions.is_empty() {
+                        println!("(no sessions)");
+                    } else {
+                        for s in sessions {
+                            println!(
+                                "[{}] {:<20}  {}  pid={}{}",
+                                s.id,
+                                s.label,
+                                s.cwd.display(),
+                                s.spawned_at_ms / 1000,
+                                if s.permission_pending { "  ⚠" } else { "" }
+                            );
+                        }
+                    }
+                }
+                other => anyhow::bail!("unexpected event: {other:?}"),
+            }
+        }
+        "kill" => {
+            let id: u64 = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("usage: cmux ctl kill <id>"))?
+                .parse()
+                .context("parse session id")?;
+            c.send(&cmux_proto::Request::Detach {
+                session_id: id,
+                keep_session: false,
+            })?;
+            println!("kill sent for session {id}");
+        }
+        "shutdown" => {
+            c.send(&cmux_proto::Request::Shutdown)?;
+            // best-effort drain
+            let _ = c.recv();
+            println!("shutdown requested");
+        }
+        "status" => {
+            c.send(&cmux_proto::Request::ListSessions)?;
+            match c.recv()? {
+                cmux_proto::Event::SessionList { sessions } => {
+                    println!("cmuxd: {} sessions", sessions.len());
+                }
+                other => anyhow::bail!("unexpected event: {other:?}"),
+            }
+        }
+        "" => {
+            println!("usage: cmux ctl <list|kill <id>|shutdown|status>");
+        }
+        other => anyhow::bail!("unknown ctl subcommand: {other}"),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("ctl") {
+        return run_ctl(&args);
+    }
     if args.iter().any(|a| a == "--connect") {
         return run_connect_mode(&args);
     }
