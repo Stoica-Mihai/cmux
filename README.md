@@ -4,25 +4,67 @@ A tmux-like TUI for running and watching many `claude` sessions side-by-side, ea
 
 Pure Rust. No tmux required.
 
-Sessions are restored across TUI restarts: the session list (cwd, label, dangerous flag, resume id, sidebar state) is persisted to `$XDG_CONFIG_HOME/cmux/state.json` (fallback `~/.config/cmux/state.json`). On launch each saved session is respawned, using `claude --resume <id>` when a resume id is known so transcript history reattaches.
+Two backends:
+
+- **Local (default)** — `cmux` owns each `claude` PTY itself. When `cmux` exits, sessions die. The session list (cwd, label, dangerous flag, resume id, sidebar state) is persisted to `$XDG_CONFIG_HOME/cmux/state.json`; on next launch each saved entry is respawned with `claude --resume <id>` so the conversation reattaches at the application layer.
+- **Daemon (`cmux --connect`)** — a long-lived `cmuxd` process owns the PTYs. `cmux` becomes a thin client: it renders, forwards keys/mouse/resize, and copies on selection. Close `cmux` and the `claude` processes stay running inside `cmuxd`. Reopen `cmux --connect` and every session reattaches with its live scrollback intact. Title bar shows a green `cmuxd` chip whenever you're in this mode.
+
+## Repo layout (Cargo workspace)
+
+```
+crates/
+├── cmux/         # TUI binary
+├── cmux-proto/   # wire types + framed JSON codec
+└── cmuxd/        # daemon binary
+```
 
 ## Requirements
 
 - `claude` CLI on `PATH`.
 - A terminal with raw-mode + alternate-screen support (any modern terminal).
 
-## Install
+## Build / install
 
 ```
-cargo install --path .
+# both binaries, release
+cargo build --release --workspace
+
+# from workspace root
+target/release/cmux           # TUI (local mode)
+target/release/cmuxd          # daemon
 ```
 
-Or build directly:
+Or with cargo:
 
 ```
-cargo build --release
-./target/release/cmux
+cargo run -p cmux             # TUI
+cargo run -p cmuxd            # daemon
+cargo run -p cmux -- --connect   # TUI in daemon-backed mode
+cargo run -p cmux -- ctl list    # admin CLI
 ```
+
+## Daemon mode
+
+Persistent sessions across `cmux` exits.
+
+```
+# terminal A: start the daemon (leave running)
+cmuxd
+
+# terminal B: open the TUI, talking to the daemon
+cmux --connect
+```
+
+`cmux` connects to `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` (fallback `/tmp/cmux-<uid>/cmux/`), lists existing sessions, and hydrates the sidebar. New sessions you spawn (`Ctrl+A n`) go through the daemon. Quitting `cmux` (`Ctrl+Q`) sends `Detach { keep_session: true }` for every session — `cmuxd` keeps them alive.
+
+### `cmux ctl` admin commands
+
+| Command | Action |
+|---|---|
+| `cmux ctl list` | Print every session the daemon is hosting |
+| `cmux ctl status` | Session count summary |
+| `cmux ctl kill <id>` | Detach + kill the given session id |
+| `cmux ctl shutdown` | Stop the daemon (kills every session it owns) |
 
 ## Selecting text
 
@@ -145,22 +187,30 @@ Delete the file to start clean.
 
 ## Architecture
 
+### Local mode (default)
 - `portable-pty` spawns each `claude` instance into a real PTY in its chosen cwd.
 - A dedicated reader thread per session blocks on `read()` and feeds bytes into an `alacritty_terminal::Term` via `vte::ansi::Processor::advance`.
-- A custom `TermWidget` (`src/term_render.rs`) walks the term's `display_iter` and writes each `Cell` into ratatui's `Buffer`, mapping alacritty SGR flags (bold/dim/italic/underline/strikeout/inverse) and color (`Named` / `Spec(Rgb)` / `Indexed`) onto ratatui styles.
+- A custom `TermWidget` (`crates/cmux/src/term_render.rs`) walks the term's `display_iter` and writes each `Cell` into ratatui's `Buffer`, mapping alacritty SGR flags (bold/dim/italic/underline/strikeout/inverse) and color (`Named` / `Spec(Rgb)` / `Indexed`) onto ratatui styles.
 - After every draw, actual rendered tile sizes are pushed back to each PTY via `MasterPty::resize` and `Term::resize` so claude sees correct dimensions even as the grid reshapes.
 - Scrollback is driven through `Term::scroll_display(Scroll::Delta | PageUp | PageDown | Top | Bottom)`.
 - Sessions whose child exits are reaped on the next event-loop tick.
 - Resume uses `claude --resume <session_id>`; the id is extracted from the transcript path under `~/.claude/projects/<slugified-cwd>/<id>.jsonl`.
 
+### Daemon mode (`--connect`)
+- `cmuxd` owns every PTY, parser, and alacritty `Term` instance. Runs on a `tokio` multi-thread runtime.
+- Communication over a UNIX socket at `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` with file mode `0o600`. Per-message framing is `u32_le length || serde_json payload`.
+- Per session inside the daemon: blocking PTY reader → fans bytes into `tokio::sync::broadcast::Sender<Vec<u8>>` so every attached client gets the same byte stream as a `FrameDelta` event.
+- `cmux --connect` runs the same TUI / renderer / mouse selection / OSC 52 path as local mode. The only difference is per-Session backend: `Session::Backend::Daemon` routes `write()` / `resize()` / `kill()` / `detach_keep()` to `Request::Input` / `Request::Resize` / `Request::Detach`.
+- A connection-side reader thread distributes `FrameDelta` events into per-session `DaemonSlot` Arcs (parser + ring + dirty + alive). UI code reads these unchanged from local mode.
+
 ## Dependencies
 
-`alacritty_terminal` (via re-exported `vte` 0.15), `portable-pty`, `ratatui`, `crossterm`, `serde`, `serde_json`, `anyhow`.
+Workspace: `alacritty_terminal` (via re-exported `vte` 0.15), `portable-pty`, `ratatui`, `crossterm`, `serde`, `serde_json`, `chrono`, `anyhow`. Daemon adds `tokio`, `thiserror`.
 
 ## Known limitations
 
 - `alacritty_terminal` parses VT-text-class sequences faithfully (full xterm SGR, OSC 8 hyperlinks, OSC 52 clipboard requests, synchronized output, bracketed paste, mouse SGR), but image-class protocols are out of scope: sixel, kitty graphics, iTerm2 inline images are silently dropped. Adding any of those requires a passthrough render path that bypasses the cell grid for the focused tile.
 - Custom renderer collapses each cell into a single ratatui buffer cell. Wide CJK chars render correctly but combining marks beyond the base char (zerowidth extras) are dropped. OSC 8 hyperlink cells render but the link itself is not emitted via OSC 8 to the outer terminal.
-- No mouse forwarding inside zoomed sessions.
+- Daemon mode survives `cmux` exit. It does **not** survive `cmuxd` exit — kill the daemon and every owned PTY dies with it. Snapshot-based restore across daemon restarts is not yet shipped.
+- The TUI must auto-spawn `cmuxd` if not running — not yet implemented. For now start `cmuxd` manually before `cmux --connect`.
 - Small preview tiles (e.g. 4 sessions at 80×24 → ~38×10 each) — claude UI is not really readable at that size; preview is for "is it idle / waiting / running" awareness, then zoom in.
-- Persisted sessions reattach by spawning a fresh `claude --resume <id>`; the PTY itself is not preserved across restarts, only the conversation.
