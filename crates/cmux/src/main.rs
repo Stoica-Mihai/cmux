@@ -1,5 +1,6 @@
 mod app;
 mod client;
+mod daemon_app;
 mod keys;
 mod persist;
 mod session;
@@ -28,11 +29,9 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 
-fn run_connect_probe(args: &[String]) -> Result<()> {
+fn run_connect_mode(args: &[String]) -> Result<()> {
     let path = client::socket_path()
         .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
-    let mut c = client::Client::connect(&path)?;
-
     let cwd = args
         .iter()
         .position(|a| a == "--cwd")
@@ -40,81 +39,13 @@ fn run_connect_probe(args: &[String]) -> Result<()> {
         .cloned()
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let spawn_cmd = args.iter().any(|a| a == "--spawn");
-
-    if !spawn_cmd {
-        c.send(&cmux_proto::Request::ListSessions)?;
-        match c.recv()? {
-            cmux_proto::Event::SessionList { sessions } => {
-                eprintln!("cmux: {} sessions on daemon", sessions.len());
-                for s in sessions {
-                    eprintln!("  [{}] {} ({})", s.id, s.label, s.cwd.display());
-                }
-            }
-            other => eprintln!("cmux: unexpected event: {other:?}"),
-        }
-        return Ok(());
-    }
-
-    // Spawn → wait SessionSpawned → Subscribe → drain a few FrameDeltas.
-    c.send(&cmux_proto::Request::SpawnSession {
-        cwd,
-        dangerous: false,
-        resume_id: None,
-        label: Some("probe".to_string()),
-    })?;
-    let id = loop {
-        match c.recv()? {
-            cmux_proto::Event::SessionSpawned { id, info } => {
-                eprintln!("cmux: spawned [{}] {} at {}", id, info.label, info.cwd.display());
-                break id;
-            }
-            cmux_proto::Event::Error { message, .. } => {
-                anyhow::bail!("daemon error: {message}");
-            }
-            other => eprintln!("cmux: unexpected: {other:?}"),
-        }
-    };
-    c.send(&cmux_proto::Request::Subscribe { session_id: id })?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let mut total: usize = 0;
-    while std::time::Instant::now() < deadline {
-        match c.recv()? {
-            cmux_proto::Event::FrameDelta { id: rid, bytes } if rid == id => {
-                total += bytes.len();
-                if total < 256 {
-                    eprintln!(
-                        "cmux: {} bytes ({} total): {:?}",
-                        bytes.len(),
-                        total,
-                        String::from_utf8_lossy(&bytes[..bytes.len().min(64)])
-                    );
-                }
-                if total > 32_000 {
-                    break;
-                }
-            }
-            cmux_proto::Event::Resync { .. } => eprintln!("cmux: resync requested"),
-            cmux_proto::Event::Snapshot { .. } => {}
-            cmux_proto::Event::StatusUpdate { .. } => {}
-            cmux_proto::Event::Error { message, .. } => {
-                anyhow::bail!("daemon error: {message}");
-            }
-            other => eprintln!("cmux: unexpected: {other:?}"),
-        }
-    }
-    eprintln!("cmux: drained {} bytes from session {}", total, id);
-    c.send(&cmux_proto::Request::Detach {
-        session_id: id,
-        keep_session: false,
-    })?;
-    Ok(())
+    daemon_app::run(&path, cwd)
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--connect") {
-        return run_connect_probe(&args);
+        return run_connect_mode(&args);
     }
 
     install_panic_hook();

@@ -47,6 +47,39 @@ impl Client {
     pub fn recv(&mut self) -> Result<Event, FrameError> {
         read_frame(&mut self.stream)
     }
+
+    /// Split into reader (blocking recv) and writer (blocking send) halves.
+    /// Both halves clone the underlying socket fd; either side can be parked
+    /// on its respective syscall without blocking the other.
+    pub fn split(self) -> std::io::Result<(ClientReader, ClientWriter)> {
+        let r = self.stream.try_clone()?;
+        Ok((
+            ClientReader { stream: r },
+            ClientWriter {
+                stream: self.stream,
+            },
+        ))
+    }
+}
+
+pub struct ClientReader {
+    stream: UnixStream,
+}
+
+impl ClientReader {
+    pub fn recv(&mut self) -> Result<Event, FrameError> {
+        read_frame(&mut self.stream)
+    }
+}
+
+pub struct ClientWriter {
+    stream: UnixStream,
+}
+
+impl ClientWriter {
+    pub fn send(&mut self, req: &Request) -> Result<(), FrameError> {
+        write_frame(&mut self.stream, req)
+    }
 }
 
 pub fn socket_path() -> Option<PathBuf> {
