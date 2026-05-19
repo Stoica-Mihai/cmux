@@ -137,23 +137,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     Ok(())
 }
 
-fn ensure_scrollback(app: &mut App) {
-    if matches!(app.mode, Mode::Scrollback(_)) {
-        return;
-    }
-    let Some(s) = app.sessions.get_mut(app.focus) else { return };
-    let id = s.id;
-    let (rows, cols) = s.size;
-    let bytes: Vec<u8> = s
-        .byte_ring
-        .lock()
-        .map(|r| r.iter().copied().collect())
-        .unwrap_or_default();
-    s.scrollback = Some(session::build_scrollback(rows, cols, &bytes));
-    app.mode = Mode::Scrollback(id);
-    app.needs_redraw = true;
-}
-
 fn apply_scroll_lines(app: &mut App, delta: i32) {
     use alacritty_terminal::grid::Scroll;
     let Mode::Scrollback(id) = app.mode else { return };
@@ -208,8 +191,14 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             let up = matches!(me.kind, MouseEventKind::ScrollUp);
-            ensure_scrollback(app);
-            apply_scroll_lines(app, if up { 3 } else { -3 });
+            if matches!(app.mode, Mode::Scrollback(_)) {
+                // we built the ring view manually — scroll it
+                apply_scroll_lines(app, if up { 3 } else { -3 });
+            } else if let Some(s) = app.sessions.get_mut(app.focus) {
+                // forward PgUp/PgDn so claude's own scrollback engages
+                let seq: &[u8] = if up { b"\x1b[5~" } else { b"\x1b[6~" };
+                let _ = s.write(seq);
+            }
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if let Some(s) = app.sessions.get_mut(app.focus) {
