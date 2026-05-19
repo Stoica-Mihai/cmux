@@ -71,7 +71,7 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
         header(" Sidebar badges"),
         note("⠋ green  busy (claude working)"),
         note("○ cyan   idle (claude waiting for input)"),
-        note("● red    permission prompt waiting"),
+        note("⚠ red    permission prompt waiting"),
         note("· gray   dormant"),
         note("✕ red    session exited"),
         note("↺ cyan   resumed session"),

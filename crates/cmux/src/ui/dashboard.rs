@@ -143,14 +143,7 @@ fn draw_sidebar_row(
             Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("[{}]", idx + 1), Style::default().fg(theme::FG_MUTED)),
-        if s.permission_pending {
-            Span::styled(
-                "●",
-                Style::default().fg(theme::ACCENT_RED).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::raw(" ")
-        },
+        Span::raw(" "),
         Span::styled(
             if s.resume_id.is_some() { "↺" } else { " " }.to_string(),
             Style::default().fg(theme::ACCENT_CYAN),
@@ -278,20 +271,25 @@ fn draw_tile(
 }
 
 /// Border color encodes state priority: exit > permission-pending pulse >
-/// zoom > focus > idle. Pulse alternates with `render_tick % 2` so the
-/// permission prompt flashes once per heartbeat.
+/// zoom > focus > idle. The pulse is wall-clock-driven (one toggle per
+/// `PULSE_PERIOD_MS`) so it stays ~1 Hz regardless of how often the frame
+/// is redrawn — render_tick advanced on every dirty byte, which made the
+/// old `render_tick % 2` pulse flicker at the PTY rate instead of pulsing
+/// like a heartbeat.
 fn tile_border_color(
     session: &Session,
     alive: bool,
     focused: bool,
     zoomed: bool,
-    render_tick: u64,
+    _render_tick: u64,
 ) -> Color {
+    const PULSE_PERIOD_MS: u64 = 900;
     if !alive {
         return theme::BORDER_DEAD;
     }
     if session.permission_pending {
-        return if render_tick.is_multiple_of(2) {
+        let phase = crate::util::now_ms() / PULSE_PERIOD_MS;
+        return if phase.is_multiple_of(2) {
             theme::BORDER_DEAD
         } else {
             theme::ACCENT_RED_DIM
