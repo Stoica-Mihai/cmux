@@ -191,6 +191,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             use alacritty_terminal::term::TermMode;
+            const WHEEL_REPEAT: usize = 3;
             let up = matches!(me.kind, MouseEventKind::ScrollUp);
             if matches!(app.mode, Mode::Scrollback(_)) {
                 apply_scroll_lines(app, if up { 1 } else { -1 });
@@ -198,7 +199,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                 let mode = s.parser.lock().ok().map(|p| *p.term.mode());
                 let col = me.column.saturating_sub(tile.x) + 1;
                 let row = me.row.saturating_sub(tile.y) + 1;
-                let bytes: Vec<u8> = match mode {
+                let one: Vec<u8> = match mode {
                     Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
                         let btn = if up { 64 } else { 65 };
                         format!("\x1b[<{};{};{};M", btn, col, row).into_bytes()
@@ -208,7 +209,6 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                             TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION,
                         ) =>
                     {
-                        // X10/normal mouse: ESC [ M Cb Cx Cy (1-byte each, +32 offset)
                         let btn = if up { 64u8 } else { 65u8 };
                         vec![
                             0x1b,
@@ -220,14 +220,17 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                         ]
                     }
                     Some(m) if m.intersects(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) => {
-                        // arrow up/down — what alt-screen apps usually bind
                         if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
                     }
                     _ => {
                         if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
                     }
                 };
-                let _ = s.write(&bytes);
+                let mut buf: Vec<u8> = Vec::with_capacity(one.len() * WHEEL_REPEAT);
+                for _ in 0..WHEEL_REPEAT {
+                    buf.extend_from_slice(&one);
+                }
+                let _ = s.write(&buf);
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
