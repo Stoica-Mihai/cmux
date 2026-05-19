@@ -1,0 +1,338 @@
+//! Per-PTY session state owned by the daemon.
+//!
+//! Each `Session` owns:
+//! - a `portable_pty::MasterPty` + child process running `claude`
+//! - an `alacritty_terminal::Term` parsed in lockstep by a reader thread
+//! - a 1 MiB raw-byte ring for replay
+//! - a `broadcast::Sender<Vec<u8>>` that fans PTY bytes out to attached
+//!   clients as `FrameDelta` events
+//! - a `watch::Sender<SessionInfo>` that publishes status changes
+//!
+//! See `DAEMON_PLAN.md` §7.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use alacritty_terminal::Term;
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::vte::ansi::Processor;
+use anyhow::{Context, Result};
+use cmux_proto::{ClaudeStatus, SessionInfo};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use tokio::sync::{broadcast, watch};
+
+const SCROLLBACK_LINES: usize = 4096;
+const RING_BYTES_CAP: usize = 1_048_576;
+const BROADCAST_QUEUE: usize = 1024;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TermSize {
+    pub lines: usize,
+    pub cols: usize,
+}
+
+impl Dimensions for TermSize {
+    fn total_lines(&self) -> usize {
+        self.lines
+    }
+    fn screen_lines(&self) -> usize {
+        self.lines
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
+
+pub struct TerminalState {
+    pub term: Term<VoidListener>,
+    pub proc: Processor,
+}
+
+impl TerminalState {
+    fn new(rows: u16, cols: u16) -> Self {
+        let config = TermConfig {
+            scrolling_history: SCROLLBACK_LINES,
+            ..Default::default()
+        };
+        let size = TermSize {
+            lines: rows.max(1) as usize,
+            cols: cols.max(1) as usize,
+        };
+        Self {
+            term: Term::new(config, &size, VoidListener),
+            proc: Processor::new(),
+        }
+    }
+
+    fn process(&mut self, bytes: &[u8]) {
+        self.proc.advance(&mut self.term, bytes);
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        let size = TermSize {
+            lines: rows.max(1) as usize,
+            cols: cols.max(1) as usize,
+        };
+        self.term.resize(size);
+    }
+}
+
+pub struct Session {
+    pub id: u64,
+    pub label: Mutex<String>,
+    pub cwd: PathBuf,
+    pub dangerous: bool,
+    pub resume_id: Option<String>,
+    pub term_state: Arc<Mutex<TerminalState>>,
+    pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
+    pub size: Mutex<(u16, u16)>,
+    pub spawned_at_ms: u64,
+    pub last_active_ms: Arc<AtomicU64>,
+    pub alive: Arc<AtomicBool>,
+    pub dirty: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    pub pid: Option<u32>,
+    pub bytes_tx: broadcast::Sender<Vec<u8>>,
+    pub info_tx: watch::Sender<SessionInfo>,
+    #[allow(dead_code)]
+    pub info_rx: watch::Receiver<SessionInfo>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    writer: Mutex<Box<dyn std::io::Write + Send>>,
+    #[allow(dead_code)]
+    child: Mutex<Box<dyn Child + Send + Sync>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    #[allow(dead_code)]
+    reader_thread: JoinHandle<()>,
+}
+
+impl Session {
+    pub fn spawn(
+        id: u64,
+        label: String,
+        cwd: PathBuf,
+        dangerous: bool,
+        resume: Option<String>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<Arc<Self>> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("openpty")?;
+
+        let mut cmd = CommandBuilder::new("claude");
+        if dangerous {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        if let Some(ref rid) = resume {
+            cmd.arg("--resume");
+            cmd.arg(rid);
+        }
+        cmd.cwd(&cwd);
+        for (k, v) in std::env::vars() {
+            cmd.env(k, v);
+        }
+        if std::env::var_os("TERM").is_none() {
+            cmd.env("TERM", "xterm-256color");
+        }
+
+        let child = pair.slave.spawn_command(cmd).context("spawn claude")?;
+        let killer = child.clone_killer();
+        drop(pair.slave);
+
+        let reader = pair.master.try_clone_reader().context("clone reader")?;
+        let writer = pair.master.take_writer().context("take writer")?;
+
+        let term_state = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
+        let byte_ring: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
+        let now = now_ms();
+        let last_active_ms = Arc::new(AtomicU64::new(now));
+        let (bytes_tx, _bytes_rx) = broadcast::channel::<Vec<u8>>(BROADCAST_QUEUE);
+        let pid = child.process_id();
+
+        let info = SessionInfo {
+            id,
+            label: label.clone(),
+            cwd: cwd.clone(),
+            dangerous,
+            resume_id: resume.clone(),
+            rows,
+            cols,
+            spawned_at_ms: now,
+            last_active_ms: now,
+            status: ClaudeStatus::Unknown,
+            permission_pending: false,
+        };
+        let (info_tx, info_rx) = watch::channel(info);
+
+        let reader_thread = {
+            let term_state = term_state.clone();
+            let alive_t = alive.clone();
+            let dirty_t = dirty.clone();
+            let last_active_t = last_active_ms.clone();
+            let ring_t = byte_ring.clone();
+            let bytes_tx_t = bytes_tx.clone();
+            let mut reader = reader;
+            std::thread::Builder::new()
+                .name(format!("pty-reader-{}", id))
+                .spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                let chunk = buf[..n].to_vec();
+                                if let Ok(mut t) = term_state.lock() {
+                                    t.process(&chunk);
+                                }
+                                if let Ok(mut r) = ring_t.lock() {
+                                    r.extend(chunk.iter().copied());
+                                    let over = r.len().saturating_sub(RING_BYTES_CAP);
+                                    if over > 0 {
+                                        r.drain(..over);
+                                    }
+                                }
+                                last_active_t.store(now_ms(), Ordering::SeqCst);
+                                dirty_t.store(true, Ordering::Relaxed);
+                                // best-effort fan-out — drop on full
+                                let _ = bytes_tx_t.send(chunk);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    alive_t.store(false, Ordering::SeqCst);
+                })?
+        };
+
+        Ok(Arc::new(Self {
+            id,
+            label: Mutex::new(label),
+            cwd,
+            dangerous,
+            resume_id: resume,
+            term_state,
+            byte_ring,
+            size: Mutex::new((rows, cols)),
+            spawned_at_ms: now,
+            last_active_ms,
+            alive,
+            dirty,
+            pid,
+            bytes_tx,
+            info_tx,
+            info_rx,
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(writer),
+            child: Mutex::new(child),
+            killer: Mutex::new(killer),
+            reader_thread,
+        }))
+    }
+
+    pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
+        let mut w = self.writer.lock().map_err(|_| anyhow::anyhow!("writer poisoned"))?;
+        w.write_all(bytes)?;
+        w.flush()?;
+        Ok(())
+    }
+
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        {
+            let mut size = self.size.lock().map_err(|_| anyhow::anyhow!("size poisoned"))?;
+            if *size == (rows, cols) {
+                return Ok(());
+            }
+            *size = (rows, cols);
+        }
+        {
+            let m = self.master.lock().map_err(|_| anyhow::anyhow!("master poisoned"))?;
+            m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("resize pty")?;
+        }
+        if let Ok(mut t) = self.term_state.lock() {
+            t.resize(rows, cols);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn ring_snapshot(&self) -> Vec<u8> {
+        self.byte_ring
+            .lock()
+            .map(|r| r.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn info(&self) -> SessionInfo {
+        let label = self
+            .label
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let (rows, cols) = self
+            .size
+            .lock()
+            .map(|s| *s)
+            .unwrap_or((24, 80));
+        SessionInfo {
+            id: self.id,
+            label,
+            cwd: self.cwd.clone(),
+            dangerous: self.dangerous,
+            resume_id: self.resume_id.clone(),
+            rows,
+            cols,
+            spawned_at_ms: self.spawned_at_ms,
+            last_active_ms: self.last_active_ms.load(Ordering::SeqCst),
+            status: ClaudeStatus::Unknown,
+            permission_pending: false,
+        }
+    }
+
+    pub fn rename(&self, new_label: String) {
+        if let Ok(mut l) = self.label.lock() {
+            *l = new_label;
+        }
+        let info = self.info();
+        let _ = self.info_tx.send(info);
+    }
+
+    pub fn kill(&self) {
+        if let Ok(mut k) = self.killer.lock() {
+            let _ = k.kill();
+        }
+        self.alive.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}

@@ -8,6 +8,7 @@ name = "cmux"
 path = "src/main.rs"
 
 [dependencies]
+cmux-proto = { path = "../cmux-proto" }
 alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

@@ -1,18 +1,22 @@
 //! `cmuxd` — long-lived daemon owning every `claude` PTY.
-//!
-//! Phase 2: socket lifecycle + Hello/Welcome handshake. No session ownership
-//! yet — that lands in phase 3. See `DAEMON_PLAN.md`.
 
+mod session;
+
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use cmux_proto::{Event, FrameError, PROTOCOL_VERSION, Request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast, mpsc};
+
+use crate::session::Session;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,7 +35,6 @@ fn socket_dir() -> Result<PathBuf> {
 }
 
 fn nix_compat_uid() -> u32 {
-    // Avoid the libc dep just for getuid: read /proc/self/status, or fall back.
     if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
         for line in s.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
@@ -53,6 +56,42 @@ fn ready_path() -> Result<PathBuf> {
     Ok(socket_dir()?.join("cmuxd.ready"))
 }
 
+/// Daemon-global state shared across all connections.
+struct Registry {
+    sessions: Mutex<HashMap<u64, Arc<Session>>>,
+    next_id: AtomicU64,
+}
+
+impl Registry {
+    fn new() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    async fn list(&self) -> Vec<cmux_proto::SessionInfo> {
+        let sessions = self.sessions.lock().await;
+        sessions.values().map(|s| s.info()).collect()
+    }
+
+    async fn insert(&self, sess: Arc<Session>) {
+        self.sessions.lock().await.insert(sess.id, sess);
+    }
+
+    async fn get(&self, id: u64) -> Option<Arc<Session>> {
+        self.sessions.lock().await.get(&id).cloned()
+    }
+
+    async fn remove(&self, id: u64) -> Option<Arc<Session>> {
+        self.sessions.lock().await.remove(&id)
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let dir = socket_dir()?;
@@ -60,10 +99,7 @@ async fn main() -> Result<()> {
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).ok();
 
     let sock = socket_path()?;
-    // Stale-socket cleanup. A previous daemon may have crashed without unlinking.
     if sock.exists() {
-        // If something is already listening we'd refuse to bind below; bail early
-        // in that case to avoid clobbering a live daemon.
         if UnixStream::connect(&sock).await.is_ok() {
             anyhow::bail!(
                 "another cmuxd already listening at {} — refusing to start",
@@ -77,15 +113,16 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind {}", sock.display()))?;
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600)).ok();
 
-    // ready-stamp: tells the spawning TUI we're listening
     let ready = ready_path()?;
     let _ = fs::write(&ready, std::process::id().to_string());
 
     eprintln!("cmuxd v{} listening at {}", SERVER_VERSION, sock.display());
 
+    let registry = Arc::new(Registry::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     let accept_shutdown = shutdown_tx.clone();
+    let accept_registry = registry.clone();
     let accept_task = tokio::spawn(async move {
         let mut shutdown_rx = accept_shutdown.subscribe();
         loop {
@@ -94,7 +131,12 @@ async fn main() -> Result<()> {
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, _addr)) => {
-                            tokio::spawn(handle_connection(stream));
+                            let reg = accept_registry.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(stream, reg).await {
+                                    eprintln!("cmuxd: connection error: {e}");
+                                }
+                            });
                         }
                         Err(e) => {
                             eprintln!("cmuxd: accept error: {e}");
@@ -106,7 +148,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Graceful shutdown on SIGINT / SIGTERM
     tokio::select! {
         _ = signal::ctrl_c() => {
             eprintln!("cmuxd: SIGINT received, shutting down");
@@ -117,6 +158,13 @@ async fn main() -> Result<()> {
     }
     let _ = shutdown_tx.send(());
     let _ = accept_task.await;
+
+    // kill all sessions on shutdown
+    let sessions = registry.sessions.lock().await;
+    for s in sessions.values() {
+        s.kill();
+    }
+    drop(sessions);
 
     let _ = fs::remove_file(&sock);
     let _ = fs::remove_file(&ready);
@@ -132,48 +180,263 @@ async fn wait_sigterm() {
     }
 }
 
-async fn handle_connection(mut stream: UnixStream) {
-    if let Err(e) = handshake(&mut stream).await {
-        eprintln!("cmuxd: handshake failed: {e}");
-        let _ = stream.shutdown().await;
-        return;
-    }
-    // Phase 2 ends here — connection is closed after handshake. Phase 3 will
-    // keep the connection open for session ownership operations.
-    let _ = stream.shutdown().await;
-}
+async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
+    let (mut read_half, write_half) = stream.into_split();
 
-async fn handshake(stream: &mut UnixStream) -> Result<()> {
-    let req: Request = read_frame_async(stream)
-        .await
-        .context("reading Hello")?;
-    let Request::Hello { client_version, want_protocol } = req else {
-        anyhow::bail!("expected Hello as first message, got {req:?}");
+    // outbound queue: any task that wants to send an Event posts here, the writer
+    // task drains and frames.
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(256);
+    let mut write_half = write_half;
+    let writer_task = tokio::spawn(async move {
+        while let Some(ev) = event_rx.recv().await {
+            if write_frame_async(&mut write_half, &ev).await.is_err() {
+                break;
+            }
+        }
+        let _ = write_half.shutdown().await;
+    });
+
+    // Hello/Welcome handshake
+    let first: Request = match read_frame_async(&mut read_half).await {
+        Ok(r) => r,
+        Err(FrameError::Eof) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let Request::Hello { client_version, want_protocol } = first else {
+        let _ = event_tx
+            .send(Event::Goodbye {
+                reason: "expected Hello as first message".to_string(),
+            })
+            .await;
+        return Ok(());
     };
     if want_protocol != PROTOCOL_VERSION {
-        let goodbye = Event::Goodbye {
-            reason: format!(
-                "protocol skew: client wants {}, server speaks {}",
-                want_protocol, PROTOCOL_VERSION
-            ),
-        };
-        write_frame_async(stream, &goodbye).await.ok();
-        anyhow::bail!("protocol skew");
+        let _ = event_tx
+            .send(Event::Goodbye {
+                reason: format!(
+                    "protocol skew: client wants {}, server speaks {}",
+                    want_protocol, PROTOCOL_VERSION
+                ),
+            })
+            .await;
+        return Ok(());
     }
-    let welcome = Event::Welcome {
-        server_version: SERVER_VERSION.to_string(),
-        protocol: PROTOCOL_VERSION,
-        session_count: 0,
-    };
-    write_frame_async(stream, &welcome).await?;
+    let sc = registry.sessions.lock().await.len();
+    let _ = event_tx
+        .send(Event::Welcome {
+            server_version: SERVER_VERSION.to_string(),
+            protocol: PROTOCOL_VERSION,
+            session_count: sc,
+        })
+        .await;
     eprintln!("cmuxd: client {client_version} handshake ok");
+
+    // Track subscriptions per connection; cancel forwarders on Unsubscribe / drop.
+    let mut subscriptions: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
+
+    let result: Result<()> = async {
+        loop {
+            match read_frame_async::<Request>(&mut read_half).await {
+                Ok(req) => {
+                    if let Err(e) =
+                        dispatch(req, &registry, &event_tx, &mut subscriptions).await
+                    {
+                        let _ = event_tx
+                            .send(Event::Error {
+                                request_id: None,
+                                message: format!("{e}"),
+                            })
+                            .await;
+                    }
+                }
+                Err(FrameError::Eof) => break,
+                Err(e) => {
+                    let _ = event_tx
+                        .send(Event::Error {
+                            request_id: None,
+                            message: format!("frame error: {e}"),
+                        })
+                        .await;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    for (_, h) in subscriptions.drain() {
+        h.abort();
+    }
+    drop(event_tx);
+    let _ = writer_task.await;
+    result
+}
+
+async fn dispatch(
+    req: Request,
+    registry: &Arc<Registry>,
+    event_tx: &mpsc::Sender<Event>,
+    subscriptions: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    match req {
+        Request::Hello { .. } => {
+            // already greeted; ignore duplicates
+        }
+        Request::ListSessions => {
+            let list = registry.list().await;
+            let _ = event_tx.send(Event::SessionList(list)).await;
+        }
+        Request::SpawnSession {
+            cwd,
+            dangerous,
+            resume_id,
+            label,
+        } => {
+            let id = registry.alloc_id();
+            let label = label.unwrap_or_else(|| {
+                cwd.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| cwd.display().to_string())
+            });
+            let sess = Session::spawn(id, label, cwd, dangerous, resume_id, 24, 80)
+                .context("Session::spawn")?;
+            registry.insert(sess.clone()).await;
+            let info = sess.info();
+            let _ = event_tx.send(Event::SessionSpawned { id, info }).await;
+        }
+        Request::Attach { session_id, .. } => {
+            let Some(sess) = registry.get(session_id).await else {
+                anyhow::bail!("no such session {session_id}");
+            };
+            // Phase 3 MVP: send empty snapshot (TUI builds fresh Term) and a
+            // FrameDelta carrying the full ring so the client reconstructs
+            // current state.
+            let (rows, cols) = *sess.size.lock().map_err(|_| anyhow::anyhow!("poison"))?;
+            let _ = event_tx
+                .send(Event::Snapshot {
+                    id: session_id,
+                    term_bytes: Vec::new(),
+                    size: (rows, cols),
+                })
+                .await;
+            let ring = sess.ring_snapshot();
+            if !ring.is_empty() {
+                let _ = event_tx
+                    .send(Event::FrameDelta {
+                        id: session_id,
+                        bytes: ring,
+                    })
+                    .await;
+            }
+        }
+        Request::Detach {
+            session_id,
+            keep_session,
+        } => {
+            if let Some(h) = subscriptions.remove(&session_id) {
+                h.abort();
+            }
+            if !keep_session
+                && let Some(sess) = registry.remove(session_id).await
+            {
+                sess.kill();
+                let _ = event_tx
+                    .send(Event::SessionExited {
+                        id: session_id,
+                        status: "detached".into(),
+                    })
+                    .await;
+            }
+        }
+        Request::Input { session_id, bytes } => {
+            if let Some(sess) = registry.get(session_id).await {
+                sess.write_input(&bytes)?;
+            }
+        }
+        Request::Resize {
+            session_id,
+            rows,
+            cols,
+        } => {
+            if let Some(sess) = registry.get(session_id).await {
+                sess.resize(rows, cols)?;
+            }
+        }
+        Request::Rename { session_id, label } => {
+            if let Some(sess) = registry.get(session_id).await {
+                sess.rename(label);
+                let _ = event_tx
+                    .send(Event::StatusUpdate {
+                        id: session_id,
+                        status: cmux_proto::ClaudeStatus::Unknown,
+                        label: Some(sess.info().label),
+                        permission_pending: false,
+                    })
+                    .await;
+            }
+        }
+        Request::Scroll { .. } => {
+            // Scrollback is client-side in the snapshot+delta architecture.
+            // No-op on the daemon for now; TUI manipulates its own Term copy.
+        }
+        Request::Subscribe { session_id } => {
+            if subscriptions.contains_key(&session_id) {
+                return Ok(());
+            }
+            let Some(sess) = registry.get(session_id).await else {
+                anyhow::bail!("no such session {session_id}");
+            };
+            let mut rx = sess.bytes_tx.subscribe();
+            let tx = event_tx.clone();
+            let h = tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(chunk) => {
+                            if tx
+                                .send(Event::FrameDelta {
+                                    id: session_id,
+                                    bytes: chunk,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = tx.send(Event::Resync { id: session_id }).await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            subscriptions.insert(session_id, h);
+        }
+        Request::Unsubscribe { session_id } => {
+            if let Some(h) = subscriptions.remove(&session_id) {
+                h.abort();
+            }
+        }
+        Request::Shutdown => {
+            anyhow::bail!("Shutdown not yet implemented in phase 3");
+        }
+        Request::KillAll => {
+            let sessions = registry.sessions.lock().await;
+            for s in sessions.values() {
+                s.kill();
+            }
+        }
+    }
     Ok(())
 }
 
-// Async wrappers around the sync framing helpers.
+// ---------------------------------------------------------------------------
+// Async framing helpers
+// ---------------------------------------------------------------------------
 
 async fn read_frame_async<T: for<'de> serde::Deserialize<'de>>(
-    stream: &mut UnixStream,
+    stream: &mut tokio::net::unix::OwnedReadHalf,
 ) -> Result<T, FrameError> {
     let mut len_buf = [0u8; 4];
     stream
@@ -194,7 +457,7 @@ async fn read_frame_async<T: for<'de> serde::Deserialize<'de>>(
 }
 
 async fn write_frame_async<T: serde::Serialize>(
-    stream: &mut UnixStream,
+    stream: &mut tokio::net::unix::OwnedWriteHalf,
     msg: &T,
 ) -> Result<(), FrameError> {
     let payload = serde_json::to_vec(msg)?;

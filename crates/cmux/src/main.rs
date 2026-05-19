@@ -1,4 +1,5 @@
 mod app;
+mod client;
 mod keys;
 mod persist;
 mod session;
@@ -28,6 +29,26 @@ use ratatui::backend::CrosstermBackend;
 use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 
 fn main() -> Result<()> {
+    // Phase 3: --connect probes the daemon connection. Real attach/render
+    // loop lands in phase 4. For now this just verifies the socket.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--connect") {
+        let path = client::socket_path()
+            .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
+        let mut c = client::Client::connect(&path)?;
+        c.send(&cmux_proto::Request::ListSessions)?;
+        match c.recv()? {
+            cmux_proto::Event::SessionList(list) => {
+                eprintln!("cmux: {} sessions on daemon", list.len());
+                for s in list {
+                    eprintln!("  [{}] {} ({})", s.id, s.label, s.cwd.display());
+                }
+            }
+            other => eprintln!("cmux: unexpected event: {other:?}"),
+        }
+        return Ok(());
+    }
+
     install_panic_hook();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;

@@ -198,6 +198,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "chrono",
+ "cmux-proto",
  "crossterm",
  "portable-pty",
  "ratatui",
@@ -218,8 +219,10 @@ dependencies = [
 name = "cmuxd"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "cmux-proto",
+ "portable-pty",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
