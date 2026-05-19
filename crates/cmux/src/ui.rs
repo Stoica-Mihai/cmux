@@ -108,12 +108,20 @@ fn draw_daemon_lost(f: &mut Frame, area: Rect) {
     let center = ratatui::layout::Alignment::Center;
     let lines: Vec<Line> = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            "✕  cmuxd is no longer responding",
-            Style::default()
-                .fg(theme::FG)
-                .add_modifier(Modifier::BOLD),
-        ))
+        Line::from(vec![
+            Span::styled(
+                "cmuxd",
+                Style::default()
+                    .fg(theme::BORDER_DEAD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " is no longer responding",
+                Style::default()
+                    .fg(theme::FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
         .alignment(center),
         Line::from(""),
         Line::from(Span::styled(
