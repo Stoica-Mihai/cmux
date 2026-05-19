@@ -799,7 +799,12 @@ fn draw_tile(
         }
     };
 
-    if let Ok(parser) = session.parser.lock() {
+    if let Some(sb) = &session.scrollback {
+        let widget = TermWidget::new(&sb.term)
+            .with_selection(session.selection)
+            .with_cursor_bg(cursor_bg);
+        f.render_widget(widget, content_area);
+    } else if let Ok(parser) = session.parser.lock() {
         let widget = TermWidget::new(&parser.term)
             .with_selection(session.selection)
             .with_cursor_bg(cursor_bg);

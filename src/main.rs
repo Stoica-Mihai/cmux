@@ -137,6 +137,37 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
     Ok(())
 }
 
+fn ensure_scrollback(app: &mut App) {
+    if matches!(app.mode, Mode::Scrollback(_)) {
+        return;
+    }
+    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let id = s.id;
+    let (rows, cols) = s.size;
+    let bytes: Vec<u8> = s
+        .byte_ring
+        .lock()
+        .map(|r| r.iter().copied().collect())
+        .unwrap_or_default();
+    s.scrollback = Some(session::build_scrollback(rows, cols, &bytes));
+    app.mode = Mode::Scrollback(id);
+    app.needs_redraw = true;
+}
+
+fn apply_scroll_lines(app: &mut App, delta: i32) {
+    use alacritty_terminal::grid::Scroll;
+    let Mode::Scrollback(id) = app.mode else { return };
+    let Some(s) = app.sessions.iter_mut().find(|s| s.id == id) else { return };
+    let Some(sb) = s.scrollback.as_mut() else { return };
+    sb.scroll(Scroll::Delta(delta));
+    if sb.display_offset() == 0 && delta < 0 {
+        s.scrollback = None;
+        s.selection = None;
+        app.mode = Mode::Dashboard;
+    }
+    app.needs_redraw = true;
+}
+
 fn handle_mouse(app: &mut App, me: MouseEvent) {
     let Some(tile) = app.last_tile_area else { return };
     let inside = me.column >= tile.x
@@ -146,36 +177,56 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
 
     match me.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            if inside {
-                let row = me.row - tile.y;
-                let col = me.column - tile.x;
-                if let Some(s) = app.sessions.get_mut(app.focus) {
-                    s.selection = Some(term_render::TileSelection::new(row, col));
+            if let Some(s) = app.sessions.get_mut(app.focus) {
+                let had_selection = s.selection.is_some();
+                s.selection = None;
+                if inside {
+                    let row = me.row - tile.y;
+                    let col = me.column - tile.x;
+                    s.mouse_down_at = Some((row, col));
+                } else {
+                    s.mouse_down_at = None;
+                }
+                if had_selection {
                     app.needs_redraw = true;
                 }
-            } else if let Some(s) = app.sessions.get_mut(app.focus)
-                && s.selection.is_some()
-            {
-                s.selection = None;
-                app.needs_redraw = true;
             }
         }
         MouseEventKind::Drag(MouseButton::Left) if inside => {
             if let Some(s) = app.sessions.get_mut(app.focus)
-                && let Some(sel) = s.selection.as_mut()
+                && let Some(anchor) = s.mouse_down_at
             {
                 let row = me.row - tile.y;
                 let col = me.column - tile.x;
+                let sel = s.selection.get_or_insert_with(|| {
+                    term_render::TileSelection::new(anchor.0, anchor.1)
+                });
+                sel.anchor = anchor;
                 sel.tip = (row, col);
                 app.needs_redraw = true;
             }
         }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
+            let up = matches!(me.kind, MouseEventKind::ScrollUp);
+            ensure_scrollback(app);
+            apply_scroll_lines(app, if up { 3 } else { -3 });
+        }
         MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(s) = app.sessions.get_mut(app.focus) {
+                s.mouse_down_at = None;
+            }
+            let in_scrollback = matches!(app.mode, Mode::Scrollback(_));
             let Some(s) = app.sessions.get(app.focus) else { return };
             let Some(sel) = s.selection else { return };
-            let Ok(p) = s.parser.lock() else { return };
-            let text = term_render::extract_selection(&p.term, sel);
-            drop(p);
+            let text = if in_scrollback
+                && let Some(sb) = &s.scrollback
+            {
+                term_render::extract_selection(&sb.term, sel)
+            } else if let Ok(p) = s.parser.lock() {
+                term_render::extract_selection(&p.term, sel)
+            } else {
+                return;
+            };
             if !text.trim().is_empty() {
                 let count = text.chars().count();
                 emit_osc52(&text);
@@ -312,16 +363,15 @@ fn handle_reorder(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
     use alacritty_terminal::grid::Scroll;
-    let Some(s) = app.sessions.iter().find(|s| s.id == id) else {
+    let Some(s) = app.sessions.iter_mut().find(|s| s.id == id) else {
         app.mode = Mode::Dashboard;
         return Ok(());
     };
 
     let exit = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
     if exit {
-        if let Ok(mut p) = s.parser.lock() {
-            p.scroll(Scroll::Bottom);
-        }
+        s.scrollback = None;
+        s.selection = None;
         app.mode = Mode::Dashboard;
         return Ok(());
     }
@@ -339,8 +389,8 @@ fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
         }
     };
 
-    if let Ok(mut p) = s.parser.lock() {
-        p.scroll(scroll);
+    if let Some(sb) = s.scrollback.as_mut() {
+        sb.scroll(scroll);
     }
     app.mode = Mode::Scrollback(id);
     Ok(())
@@ -412,8 +462,16 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         '[' => {
-            if let Some(s) = app.sessions.get(app.focus) {
-                app.mode = Mode::Scrollback(s.id);
+            if let Some(s) = app.sessions.get_mut(app.focus) {
+                let id = s.id;
+                let (rows, cols) = s.size;
+                let bytes: Vec<u8> = s
+                    .byte_ring
+                    .lock()
+                    .map(|r| r.iter().copied().collect())
+                    .unwrap_or_default();
+                s.scrollback = Some(session::build_scrollback(rows, cols, &bytes));
+                app.mode = Mode::Scrollback(id);
             }
         }
         '?' => {

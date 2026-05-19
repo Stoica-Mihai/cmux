@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::Write;
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -16,6 +17,8 @@ use crate::term_render::{self, TermSize, TileSelection};
 use crate::util::{claude_sessions_dir, now_ms};
 
 const SCROLLBACK_LINES: usize = 4096;
+const RING_BYTES_CAP: usize = 1_048_576; // 1 MiB raw PTY history per session
+const REPLAY_HISTORY_LINES: usize = 16_384;
 
 const PROMPT_NEEDLES: &[&str] = &[
     "do you want to proceed",
@@ -56,6 +59,61 @@ fn pty_size(rows: u16, cols: u16) -> PtySize {
 pub struct TerminalState {
     pub term: Term<VoidListener>,
     pub proc: Processor,
+}
+
+/// Strip xterm alt-screen mode set/reset sequences so replay through a fresh
+/// Term keeps writes in the primary buffer (which has full scrollback).
+/// Targets CSI ?1049h, ?1049l, ?47h, ?47l, ?1047h, ?1047l.
+pub fn strip_alt_screen(input: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'[' {
+            // peek forward for ? ... h/l
+            let mut j = i + 2;
+            while j < input.len() {
+                let b = input[j];
+                if b == b'h' || b == b'l' || b == b'~' || (b as char).is_alphabetic() {
+                    break;
+                }
+                j += 1;
+            }
+            if j < input.len() && (input[j] == b'h' || input[j] == b'l') {
+                let params = &input[i + 2..j];
+                let trailer = input[j];
+                if matches!(
+                    params,
+                    b"?1049" | b"?47" | b"?1047"
+                ) && (trailer == b'h' || trailer == b'l')
+                {
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    out
+}
+
+pub fn build_scrollback(rows: u16, cols: u16, ring_bytes: &[u8]) -> TerminalState {
+    let config = TermConfig {
+        scrolling_history: REPLAY_HISTORY_LINES,
+        ..Default::default()
+    };
+    let size = TermSize {
+        lines: rows.max(1) as usize,
+        cols: cols.max(1) as usize,
+    };
+    let mut term = Term::new(config, &size, VoidListener);
+    let mut proc: Processor = Processor::new();
+    let cleaned = strip_alt_screen(ring_bytes);
+    proc.advance(&mut term, &cleaned);
+    // Start at bottom (display_offset=0) so user sees the current frame on
+    // entry; scrolling up reveals older history.
+    term.scroll_display(Scroll::Bottom);
+    TerminalState { term, proc }
 }
 
 impl TerminalState {
@@ -107,12 +165,15 @@ pub struct Session {
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
     pub dirty: Arc<AtomicBool>,
+    pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
+    pub scrollback: Option<TerminalState>,
     pub pid: Option<u32>,
     pub claude_status: ClaudeStatus,
     pub claude_name: Option<String>,
     pub permission_pending: bool,
     pub manually_renamed: bool,
     pub selection: Option<TileSelection>,
+    pub mouse_down_at: Option<(u16, u16)>,
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
     master: Box<dyn MasterPty + Send>,
@@ -162,12 +223,15 @@ impl Session {
         let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
         let dirty = Arc::new(AtomicBool::new(true));
+        let byte_ring: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
         let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
 
         let reader_thread = {
             let parser = parser.clone();
             let alive = alive.clone();
             let dirty_t = dirty.clone();
+            let ring_t = byte_ring.clone();
             let last_active = last_active_ms.clone();
             let mut reader = reader;
             thread::Builder::new()
@@ -180,6 +244,13 @@ impl Session {
                             Ok(n) => {
                                 if let Ok(mut p) = parser.lock() {
                                     p.process(&buf[..n]);
+                                }
+                                if let Ok(mut r) = ring_t.lock() {
+                                    r.extend(buf[..n].iter().copied());
+                                    let over = r.len().saturating_sub(RING_BYTES_CAP);
+                                    if over > 0 {
+                                        r.drain(..over);
+                                    }
                                 }
                                 last_active.store(now_ms(), Ordering::SeqCst);
                                 dirty_t.store(true, Ordering::Relaxed);
@@ -203,12 +274,15 @@ impl Session {
             alive,
             last_active_ms,
             dirty,
+            byte_ring,
+            scrollback: None,
             pid,
             claude_status: ClaudeStatus::Unknown,
             claude_name: None,
             permission_pending: false,
             manually_renamed: false,
             selection: None,
+            mouse_down_at: None,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             master: pair.master,
