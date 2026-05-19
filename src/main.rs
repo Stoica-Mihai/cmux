@@ -191,7 +191,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             use alacritty_terminal::term::TermMode;
-            const WHEEL_REPEAT: usize = 3;
+            const WHEEL_REPEAT: usize = 1;
             let up = matches!(me.kind, MouseEventKind::ScrollUp);
             if matches!(app.mode, Mode::Scrollback(_)) {
                 apply_scroll_lines(app, if up { 1 } else { -1 });
@@ -200,15 +200,6 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                 let col = me.column.saturating_sub(tile.x) + 1;
                 let row = me.row.saturating_sub(tile.y) + 1;
                 let one: Vec<u8> = match mode {
-                    // DEC 1007: app asks the terminal to translate wheel
-                    // to arrows in alt-screen. Takes priority even when
-                    // SGR_MOUSE is also on.
-                    Some(m)
-                        if m.contains(TermMode::ALT_SCREEN)
-                            && m.contains(TermMode::ALTERNATE_SCROLL) =>
-                    {
-                        if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
-                    }
                     Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
                         let btn = if up { 64 } else { 65 };
                         format!("\x1b[<{};{};{};M", btn, col, row).into_bytes()
@@ -227,6 +218,12 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                             (col as u8).saturating_add(32),
                             (row as u8).saturating_add(32),
                         ]
+                    }
+                    Some(m)
+                        if m.contains(TermMode::ALT_SCREEN)
+                            && m.contains(TermMode::ALTERNATE_SCROLL) =>
+                    {
+                        if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
                     }
                     _ => {
                         if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
