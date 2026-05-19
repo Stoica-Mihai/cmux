@@ -171,6 +171,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Spawn a per-session ticker that polls the claude session JSON + scans the
+/// terminal grid for permission prompts. Lives as long as the session does;
+/// downgrades to a Weak so it exits cleanly when the session is dropped.
+fn spawn_status_task(sess: std::sync::Arc<Session>) {
+    let weak = std::sync::Arc::downgrade(&sess);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let Some(sess) = weak.upgrade() else { break };
+            if !sess.alive.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            sess.poll_status_once();
+        }
+    });
+}
+
 async fn wait_sigterm() {
     use signal::unix::{SignalKind, signal};
     if let Ok(mut sig) = signal(SignalKind::terminate()) {
@@ -317,6 +335,7 @@ async fn dispatch(
             let sess = Session::spawn(id, label, cwd, dangerous, resume_id, 24, 80)
                 .context("Session::spawn")?;
             registry.insert(sess.clone()).await;
+            spawn_status_task(sess.clone());
             let info = sess.info();
             let _ = event_tx.send(Event::SessionSpawned { id, info }).await;
         }
@@ -402,6 +421,7 @@ async fn dispatch(
             let Some(sess) = registry.get(session_id).await else {
                 anyhow::bail!("no such session {session_id}");
             };
+            // Byte fan-out
             let mut rx = sess.bytes_tx.subscribe();
             let tx = event_tx.clone();
             let h = tokio::spawn(async move {
@@ -427,6 +447,37 @@ async fn dispatch(
                 }
             });
             subscriptions.insert(session_id, h);
+
+            // Status fan-out: forward info_tx changes as StatusUpdate events.
+            let mut info_rx = sess.info_rx.clone();
+            let tx2 = event_tx.clone();
+            tokio::spawn(async move {
+                // emit initial state
+                let info = info_rx.borrow().clone();
+                let _ = tx2
+                    .send(Event::StatusUpdate {
+                        id: session_id,
+                        status: info.status,
+                        label: Some(info.label),
+                        permission_pending: info.permission_pending,
+                    })
+                    .await;
+                while info_rx.changed().await.is_ok() {
+                    let info = info_rx.borrow().clone();
+                    if tx2
+                        .send(Event::StatusUpdate {
+                            id: session_id,
+                            status: info.status,
+                            label: Some(info.label),
+                            permission_pending: info.permission_pending,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
         }
         Request::Unsubscribe { session_id } => {
             if let Some(h) = subscriptions.remove(&session_id) {

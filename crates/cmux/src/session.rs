@@ -139,6 +139,12 @@ impl TerminalState {
         self.proc.advance(&mut self.term, bytes);
     }
 
+    /// Construct a fresh `TerminalState` at the given grid size. Used by
+    /// `Event::Resync` handling on the daemon-backed path.
+    pub fn fresh(rows: u16, cols: u16) -> Self {
+        Self::new(rows, cols)
+    }
+
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let size = TermSize {
             lines: rows.max(1) as usize,
@@ -163,6 +169,16 @@ pub struct DaemonSlot {
     pub dirty: Arc<AtomicBool>,
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
+    pub pending_status: Arc<Mutex<Option<PendingStatus>>>,
+}
+
+/// Latest `Event::StatusUpdate` payload that hasn't yet been merged into the
+/// owning `Session` struct. Drained on the next `Session::poll_status` tick.
+#[derive(Debug, Clone)]
+pub struct PendingStatus {
+    pub status: cmux_proto::ClaudeStatus,
+    pub label: Option<String>,
+    pub permission_pending: bool,
 }
 
 enum Backend {
@@ -201,6 +217,7 @@ pub struct Session {
     pub mouse_down_at: Option<(u16, u16)>,
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
+    daemon_pending_status: Option<Arc<Mutex<Option<PendingStatus>>>>,
     backend: Backend,
 }
 
@@ -306,6 +323,7 @@ impl Session {
             mouse_down_at: None,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
+            daemon_pending_status: None,
             backend: Backend::Local {
                 master: pair.master,
                 writer,
@@ -339,12 +357,15 @@ impl Session {
         let byte_ring: Arc<Mutex<VecDeque<u8>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
         let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
+        let pending_status: Arc<Mutex<Option<PendingStatus>>> =
+            Arc::new(Mutex::new(None));
         let slot = DaemonSlot {
             parser: parser.clone(),
             byte_ring: byte_ring.clone(),
             dirty: dirty.clone(),
             alive: alive.clone(),
             last_active_ms: last_active_ms.clone(),
+            pending_status: pending_status.clone(),
         };
         let s = Self {
             id,
@@ -368,6 +389,7 @@ impl Session {
             mouse_down_at: None,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
+            daemon_pending_status: Some(pending_status),
             backend: Backend::Daemon { remote_id, req_tx },
         };
         (s, slot)
@@ -384,6 +406,35 @@ impl Session {
             return;
         }
         self.last_status_check_ms = now;
+
+        // Daemon mode: drain pending StatusUpdate(s) emitted by the events
+        // reader thread. Skip the local PID-file lookup since the claude
+        // process isn't ours.
+        if let Some(slot) = self.daemon_pending_status.as_ref() {
+            if let Ok(mut ps) = slot.lock()
+                && let Some(p) = ps.take()
+            {
+                let mapped = match p.status {
+                    cmux_proto::ClaudeStatus::Busy => ClaudeStatus::Busy,
+                    cmux_proto::ClaudeStatus::Idle => ClaudeStatus::Idle,
+                    cmux_proto::ClaudeStatus::Unknown => ClaudeStatus::Unknown,
+                };
+                if self.claude_status != mapped {
+                    self.claude_status = mapped;
+                }
+                if let Some(n) = p.label
+                    && !n.is_empty()
+                    && self.claude_name.as_deref() != Some(n.as_str())
+                {
+                    if !self.manually_renamed {
+                        self.label = n.clone();
+                    }
+                    self.claude_name = Some(n);
+                }
+                self.permission_pending = p.permission_pending;
+            }
+            return;
+        }
 
         if let Some(pid) = self.pid {
             let path = claude_sessions_dir().map(|d| d.join(format!("{}.json", pid)));

@@ -205,6 +205,37 @@ fn run_ctl(args: &[String]) -> Result<()> {
             })?;
             println!("kill sent for session {id}");
         }
+        "spawn" => {
+            let cwd_arg = args.get(3).cloned().unwrap_or_else(|| ".".into());
+            let cwd: PathBuf = if cwd_arg == "." {
+                std::env::current_dir().context("getcwd")?
+            } else {
+                PathBuf::from(&cwd_arg)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(cwd_arg))
+            };
+            let dangerous = args.iter().any(|a| a == "--dangerous");
+            let label = args
+                .iter()
+                .position(|a| a == "--label")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            c.send(&cmux_proto::Request::SpawnSession {
+                cwd: cwd.clone(),
+                dangerous,
+                resume_id: None,
+                label,
+            })?;
+            match c.recv()? {
+                cmux_proto::Event::SessionSpawned { id, info } => {
+                    println!("spawned [{}] {} at {}", id, info.label, info.cwd.display());
+                }
+                cmux_proto::Event::Error { message, .. } => {
+                    anyhow::bail!("daemon error: {message}");
+                }
+                other => anyhow::bail!("unexpected event: {other:?}"),
+            }
+        }
         "shutdown" => {
             c.send(&cmux_proto::Request::Shutdown)?;
             // best-effort drain
@@ -221,7 +252,7 @@ fn run_ctl(args: &[String]) -> Result<()> {
             }
         }
         "" => {
-            println!("usage: cmux ctl <list|kill <id>|shutdown|status>");
+            println!("usage: cmux ctl <list|spawn <cwd> [--dangerous] [--label N]|kill <id>|shutdown|status>");
         }
         other => anyhow::bail!("unknown ctl subcommand: {other}"),
     }
@@ -942,6 +973,13 @@ fn move_focused(app: &mut App, delta: i32) {
 }
 
 fn flush_persist(app: &App) {
+    // In daemon mode the daemon owns the canonical session list; the TUI
+    // must not overwrite ~/.config/cmux/state.json with daemon-adopted
+    // sessions (next launch in local mode would then try to spawn them as
+    // fresh local PTYs).
+    if app.daemon.is_some() {
+        return;
+    }
     let sessions = app
         .sessions
         .iter()

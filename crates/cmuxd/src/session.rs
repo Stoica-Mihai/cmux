@@ -21,11 +21,21 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context, Result};
 use cmux_proto::{ClaudeStatus, SessionInfo};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, watch};
+
+const PROMPT_NEEDLES: &[&str] = &[
+    "do you want to proceed",
+    "allow this",
+    "apply this edit",
+    "requires approval",
+    "don't ask again",
+    "esc to cancel",
+];
 
 const SCROLLBACK_LINES: usize = 4096;
 const RING_BYTES_CAP: usize = 1_048_576;
@@ -316,6 +326,53 @@ impl Session {
         let _ = self.info_tx.send(info);
     }
 
+    /// One pass of the status-polling logic. Reads
+    /// `~/.claude/sessions/<pid>.json`, scans the live grid for the
+    /// permission-prompt heuristics, and updates `info_tx` if any field
+    /// changed.
+    pub fn poll_status_once(&self) {
+        let mut next = self.info_tx.borrow().clone();
+        next.last_active_ms = self.last_active_ms.load(Ordering::SeqCst);
+        if let Some(pid) = self.pid {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            if let Some(home) = home {
+                let path = home
+                    .join(".claude")
+                    .join("sessions")
+                    .join(format!("{}.json", pid));
+                if let Ok(bytes) = std::fs::read(&path)
+                    && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                {
+                    if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
+                        next.status = match s {
+                            "busy" => ClaudeStatus::Busy,
+                            "idle" => ClaudeStatus::Idle,
+                            _ => ClaudeStatus::Unknown,
+                        };
+                    }
+                    if let Some(n) = v.get("name").and_then(|x| x.as_str())
+                        && !n.is_empty()
+                    {
+                        next.label = n.to_string();
+                    }
+                }
+            }
+        }
+        // permission-prompt heuristic over the visible grid
+        if let Ok(t) = self.term_state.lock() {
+            next.permission_pending = scan_permission_prompt(&t.term);
+        }
+        // emit only when something actually changed
+        let cur = self.info_tx.borrow().clone();
+        if cur.status != next.status
+            || cur.label != next.label
+            || cur.permission_pending != next.permission_pending
+            || cur.last_active_ms != next.last_active_ms
+        {
+            let _ = self.info_tx.send(next);
+        }
+    }
+
     pub fn kill(&self) {
         if let Ok(mut k) = self.killer.lock() {
             let _ = k.kill();
@@ -335,4 +392,31 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn scan_permission_prompt(term: &Term<VoidListener>) -> bool {
+    let mut text = String::new();
+    let mut last_line: Option<i32> = None;
+    for indexed in term.grid().display_iter() {
+        let line = indexed.point.line.0;
+        if Some(line) != last_line {
+            if last_line.is_some() {
+                text.push('\n');
+            }
+            last_line = Some(line);
+        }
+        if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+            || indexed.cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        let c = indexed.cell.c;
+        text.push(if c == '\0' { ' ' } else { c });
+    }
+    let lower = text.to_lowercase();
+    if PROMPT_NEEDLES.iter().any(|n| lower.contains(n)) {
+        return true;
+    }
+    let has_yes = lower.contains("1. yes");
+    has_yes && (lower.contains("2. no") || lower.contains("3. no"))
 }

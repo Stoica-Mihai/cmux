@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar};
 
+use alacritty_terminal::grid::Dimensions;
 use anyhow::{Context, Result};
 use cmux_proto::{Event, Request, SessionInfo};
 
 use crate::client::Client;
-use crate::session::DaemonSlot;
+use crate::session::{DaemonSlot, PendingStatus};
 use crate::util::now_ms;
 
 const RING_CAP: usize = 1_048_576;
@@ -166,6 +167,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
     let slots_for_reader = slots.clone();
     let pending_for_reader = pending_spawns.clone();
     let alive_for_reader = alive.clone();
+    let req_tx_for_reader = req_tx.clone();
     std::thread::Builder::new()
         .name("cmuxd-reader".into())
         .spawn(move || {
@@ -201,6 +203,47 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
                             && let Some(mb) = q.pop_front()
                         {
                             mb.fulfill(info);
+                        }
+                    }
+                    Event::Resync { id } => {
+                        // Client lagged the broadcast queue. Reset the local
+                        // grid + ring and ask the daemon to replay history.
+                        if let Ok(m) = slots_for_reader.lock()
+                            && let Some(slot) = m.get(&id)
+                        {
+                            if let Ok(mut p) = slot.parser.lock() {
+                                let (rows, cols) = (
+                                    p.term.grid().screen_lines() as u16,
+                                    p.term.grid().columns() as u16,
+                                );
+                                *p = crate::session::TerminalState::fresh(rows, cols);
+                            }
+                            if let Ok(mut r) = slot.byte_ring.lock() {
+                                r.clear();
+                            }
+                            slot.dirty.store(true, Ordering::Relaxed);
+                        }
+                        let _ = req_tx_for_reader.send(Request::Attach {
+                            session_id: id,
+                            want_history: true,
+                        });
+                    }
+                    Event::StatusUpdate {
+                        id,
+                        status,
+                        label,
+                        permission_pending,
+                    } => {
+                        if let Ok(m) = slots_for_reader.lock()
+                            && let Some(slot) = m.get(&id)
+                            && let Ok(mut ps) = slot.pending_status.lock()
+                        {
+                            *ps = Some(PendingStatus {
+                                status,
+                                label,
+                                permission_pending,
+                            });
+                            slot.dirty.store(true, Ordering::Relaxed);
                         }
                     }
                     Event::Goodbye { .. } => break,
