@@ -486,44 +486,12 @@ fn handle_paste(app: &mut App, text: &str) {
 }
 
 fn emit_osc52(text: &str) {
+    use base64::Engine;
     use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut stdout = std::io::stdout().lock();
-    let encoded = base64_encode(text.as_bytes());
     let _ = write!(stdout, "\x1b]52;c;{}\x07", encoded);
     let _ = stdout.flush();
-}
-
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let b0 = input[i];
-        let b1 = input[i + 1];
-        let b2 = input[i + 2];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[((b0 & 0x03) << 4 | (b1 >> 4)) as usize] as char);
-        out.push(ALPHABET[((b1 & 0x0f) << 2 | (b2 >> 6)) as usize] as char);
-        out.push(ALPHABET[(b2 & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = input.len() - i;
-    if rem == 1 {
-        let b0 = input[i];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let b0 = input[i];
-        let b1 = input[i + 1];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[((b0 & 0x03) << 4 | (b1 >> 4)) as usize] as char);
-        out.push(ALPHABET[((b1 & 0x0f) << 2) as usize] as char);
-        out.push('=');
-    }
-    out
 }
 
 fn log_key(key: &KeyEvent, prefix_pending: bool) {

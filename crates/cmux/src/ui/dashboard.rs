@@ -206,7 +206,7 @@ fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (St
 }
 
 fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
-    let age = humanize_short(age_ms);
+    let age = crate::util::format_duration_secs(age_ms / 1000, "");
     let status = match s.claude_status {
         ClaudeStatus::Busy => "busy",
         ClaudeStatus::Idle => "idle",
@@ -217,19 +217,6 @@ fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
         raw.chars().take(max_width).collect()
     } else {
         raw
-    }
-}
-
-fn humanize_short(ms: u64) -> String {
-    let secs = ms / 1000;
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86_400)
     }
 }
 

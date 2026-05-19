@@ -200,17 +200,9 @@ fn extract_text(v: &serde_json::Value) -> String {
 }
 
 pub fn humanize_age(mtime: SystemTime) -> String {
-    let dur = SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(mtime)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    if secs < 60 {
-        format!("{}s ago", secs)
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
+        .unwrap_or_default()
+        .as_secs();
+    crate::util::format_duration_secs(secs, " ago")
 }

@@ -14,6 +14,21 @@ pub fn prefix_hint() -> String {
     )
 }
 
+/// Format an elapsed-seconds count as a compact `s/m/h/d` cell. Caller picks
+/// the suffix — `" ago"` reads naturally on a timestamp column, `""` on a
+/// sidebar status line.
+pub fn format_duration_secs(secs: u64, suffix: &str) -> String {
+    if secs < 60 {
+        format!("{}s{}", secs, suffix)
+    } else if secs < 3600 {
+        format!("{}m{}", secs / 60, suffix)
+    } else if secs < 86_400 {
+        format!("{}h{}", secs / 3600, suffix)
+    } else {
+        format!("{}d{}", secs / 86_400, suffix)
+    }
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -197,6 +197,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64",
  "chrono",
  "cmux-proto",
  "crossterm",
