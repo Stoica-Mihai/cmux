@@ -18,8 +18,8 @@ pub struct Client {
 
 impl Client {
     pub fn connect(path: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(path)
-            .with_context(|| format!("connect {}", path.display()))?;
+        let stream =
+            UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
         let mut this = Self { stream };
         this.send(&Request::Hello {
             client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -28,7 +28,11 @@ impl Client {
         match this.recv()? {
             Event::Welcome { protocol, .. } => {
                 if protocol != PROTOCOL_VERSION {
-                    anyhow::bail!("protocol skew: server={} client={}", protocol, PROTOCOL_VERSION);
+                    anyhow::bail!(
+                        "protocol skew: server={} client={}",
+                        protocol,
+                        PROTOCOL_VERSION
+                    );
                 }
                 Ok(this)
             }

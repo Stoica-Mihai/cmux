@@ -63,8 +63,7 @@ fn try_spawn_daemon() -> Result<()> {
     }
 
     // Wait for the ready-stamp file (or socket) to appear.
-    let socket = crate::client::socket_path()
-        .ok_or_else(|| anyhow::anyhow!("no socket path"))?;
+    let socket = crate::client::socket_path().ok_or_else(|| anyhow::anyhow!("no socket path"))?;
     let ready = socket.with_file_name("cmuxd.ready");
     let deadline = Instant::now() + Duration::from_millis(2_000);
     while Instant::now() < deadline {
@@ -174,7 +173,10 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
             while let Ok(ev) = creader.recv() {
                 match ev {
                     Event::FrameDelta { id, bytes } => {
-                        let slot_opt = slots_for_reader.lock().ok().and_then(|m| m.get(&id).cloned());
+                        let slot_opt = slots_for_reader
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&id).cloned());
                         if let Some(slot) = slot_opt {
                             if let Ok(mut p) = slot.parser.lock() {
                                 p.process(&bytes);

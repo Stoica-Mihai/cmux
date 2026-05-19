@@ -51,7 +51,7 @@ pub const TERMINAL_ENV_STRIP: &[&str] = &[
 /// expose an `env(k, v)` method so this helper stays framework-agnostic.
 pub fn claude_spawn_env() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| !TERMINAL_ENV_STRIP.iter().any(|name| *name == k.as_str()))
+        .filter(|(k, _)| !TERMINAL_ENV_STRIP.contains(&k.as_str()))
         .collect();
     // Overwrite any TERM/COLORTERM that survived (some shells preset these).
     out.retain(|(k, _)| k != "TERM" && k != "COLORTERM");
@@ -346,5 +346,43 @@ mod tests {
         let mut cur = Cursor::new(buf);
         let err = read_frame::<_, Request>(&mut cur).unwrap_err();
         assert!(matches!(err, FrameError::TooLarge(_)));
+    }
+
+    // claude_spawn_env reads $TERM_PROGRAM, $TMUX, …, mutating the process
+    // env in tests would race with parallel tests in this crate. Instead the
+    // test asserts canonical-override behavior using whatever the host env
+    // happens to be: TERM/COLORTERM must always equal the cmux defaults, the
+    // strip list must never appear in the output regardless of what was set,
+    // and unrelated vars must pass through.
+    #[test]
+    fn claude_spawn_env_overrides_term_and_strips_listed() {
+        let env: std::collections::HashMap<String, String> =
+            claude_spawn_env().into_iter().collect();
+
+        // Canonical overrides — no matter what TERM/COLORTERM were set to in
+        // the host env, cmux forces these values.
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+
+        // Strip list — these must never appear in the spawn env even if the
+        // host has them set. Pick a representative subset.
+        for name in &[
+            "TERM_PROGRAM",
+            "TMUX",
+            "WT_SESSION",
+            "ITERM_SESSION_ID",
+            "KITTY_WINDOW_ID",
+        ] {
+            assert!(
+                !env.contains_key(*name),
+                "{name} should be stripped from claude spawn env"
+            );
+        }
+
+        // Pass-through smoke: PATH is essentially always set by any shell that
+        // ran cargo test, and PATH is not on the strip list.
+        if std::env::var("PATH").is_ok() {
+            assert!(env.contains_key("PATH"));
+        }
     }
 }

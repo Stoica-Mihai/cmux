@@ -7,7 +7,12 @@ use std::time::Duration;
 
 fn main() -> Result<()> {
     let pty = native_pty_system();
-    let pair = pty.openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })?;
+    let pair = pty.openpty(PtySize {
+        rows: 30,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
 
     let mut cmd = CommandBuilder::new("claude");
     cmd.arg("--help");

@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
-    MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -29,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 
-fn run_connect_mode(_args: &[String]) -> Result<()> {
+fn run_connect_mode() -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -109,9 +108,7 @@ fn event_loop(
             app.toast = None;
             app.needs_redraw = true;
         }
-        if app.needs_redraw
-            || any_session_dirty
-            || now.saturating_sub(last_draw_ms) >= HEARTBEAT_MS
+        if app.needs_redraw || any_session_dirty || now.saturating_sub(last_draw_ms) >= HEARTBEAT_MS
         {
             app.render_tick = app.render_tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
@@ -182,13 +179,64 @@ fn dispatch_event(app: &mut App, ev: Event, debug: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_ctl(args: &[String]) -> Result<()> {
-    let sub = args.get(2).cloned().unwrap_or_default();
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "cmux",
+    version,
+    about = "tmux-style TUI for managing multiple `claude` CLI sessions"
+)]
+struct Cli {
+    /// Connect to a running cmuxd daemon instead of owning local PTYs. The
+    /// daemon is auto-spawned if no socket is present.
+    #[arg(long)]
+    connect: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Talk to a running cmuxd daemon over its UNIX socket.
+    Ctl {
+        #[command(subcommand)]
+        cmd: CtlCmd,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum CtlCmd {
+    /// List sessions the daemon is currently hosting.
+    List,
+    /// Spawn a new claude session in the chosen directory.
+    Spawn {
+        /// Working directory for the new session.
+        #[arg(default_value = ".")]
+        cwd: PathBuf,
+        /// Pass `--dangerously-skip-permissions` to claude.
+        #[arg(long)]
+        dangerous: bool,
+        /// Display name for the session in the sidebar.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Kill a session by id.
+    Kill {
+        /// Session id (matches `cmux ctl list`).
+        id: u64,
+    },
+    /// Tell the daemon to exit and kill every session it owns.
+    Shutdown,
+    /// Print a one-line summary (session count).
+    Status,
+}
+
+fn run_ctl(cmd: CtlCmd) -> Result<()> {
     let path = client::socket_path()
         .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
     let mut c = client::Client::connect(&path).context("connect cmuxd")?;
-    match sub.as_str() {
-        "list" => {
+    match cmd {
+        CtlCmd::List => {
             c.send(&cmux_proto::Request::ListSessions)?;
             match c.recv()? {
                 cmux_proto::Event::SessionList { sessions } => {
@@ -210,33 +258,23 @@ fn run_ctl(args: &[String]) -> Result<()> {
                 other => anyhow::bail!("unexpected event: {other:?}"),
             }
         }
-        "kill" => {
-            let id: u64 = args
-                .get(3)
-                .ok_or_else(|| anyhow::anyhow!("usage: cmux ctl kill <id>"))?
-                .parse()
-                .context("parse session id")?;
+        CtlCmd::Kill { id } => {
             c.send(&cmux_proto::Request::Detach {
                 session_id: id,
                 keep_session: false,
             })?;
             println!("kill sent for session {id}");
         }
-        "spawn" => {
-            let cwd_arg = args.get(3).cloned().unwrap_or_else(|| ".".into());
-            let cwd: PathBuf = if cwd_arg == "." {
+        CtlCmd::Spawn {
+            cwd,
+            dangerous,
+            label,
+        } => {
+            let cwd: PathBuf = if cwd.as_os_str() == "." {
                 std::env::current_dir().context("getcwd")?
             } else {
-                PathBuf::from(&cwd_arg)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(cwd_arg))
+                cwd.canonicalize().unwrap_or(cwd)
             };
-            let dangerous = args.iter().any(|a| a == "--dangerous");
-            let label = args
-                .iter()
-                .position(|a| a == "--label")
-                .and_then(|i| args.get(i + 1))
-                .cloned();
             c.send(&cmux_proto::Request::SpawnSession {
                 cwd: cwd.clone(),
                 dangerous,
@@ -253,13 +291,13 @@ fn run_ctl(args: &[String]) -> Result<()> {
                 other => anyhow::bail!("unexpected event: {other:?}"),
             }
         }
-        "shutdown" => {
+        CtlCmd::Shutdown => {
             c.send(&cmux_proto::Request::Shutdown)?;
             // best-effort drain
             let _ = c.recv();
             println!("shutdown requested");
         }
-        "status" => {
+        CtlCmd::Status => {
             c.send(&cmux_proto::Request::ListSessions)?;
             match c.recv()? {
                 cmux_proto::Event::SessionList { sessions } => {
@@ -268,21 +306,18 @@ fn run_ctl(args: &[String]) -> Result<()> {
                 other => anyhow::bail!("unexpected event: {other:?}"),
             }
         }
-        "" => {
-            println!("usage: cmux ctl <list|spawn <cwd> [--dangerous] [--label N]|kill <id>|shutdown|status>");
-        }
-        other => anyhow::bail!("unknown ctl subcommand: {other}"),
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("ctl") {
-        return run_ctl(&args);
+    use clap::Parser;
+    let cli = Cli::parse();
+    if let Some(Command::Ctl { cmd }) = cli.command {
+        return run_ctl(cmd);
     }
-    if args.iter().any(|a| a == "--connect") {
-        return run_connect_mode(&args);
+    if cli.connect {
+        return run_connect_mode();
     }
 
     install_panic_hook();
@@ -344,9 +379,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
 
 fn apply_scroll_lines(app: &mut App, delta: i32) {
     use alacritty_terminal::grid::Scroll;
-    let Mode::Scrollback(id) = app.mode else { return };
-    let Some(s) = app.sessions.iter_mut().find(|s| s.id == id) else { return };
-    let Some(sb) = s.scrollback.as_mut() else { return };
+    let Mode::Scrollback(id) = app.mode else {
+        return;
+    };
+    let Some(s) = app.sessions.iter_mut().find(|s| s.id == id) else {
+        return;
+    };
+    let Some(sb) = s.scrollback.as_mut() else {
+        return;
+    };
     sb.scroll(Scroll::Delta(delta));
     if sb.display_offset() == 0 && delta < 0 {
         s.scrollback = None;
@@ -357,7 +398,9 @@ fn apply_scroll_lines(app: &mut App, delta: i32) {
 }
 
 fn handle_mouse(app: &mut App, me: MouseEvent) {
-    let Some(tile) = app.last_tile_area else { return };
+    let Some(tile) = app.last_tile_area else {
+        return;
+    };
     let inside = me.column >= tile.x
         && me.column < tile.x + tile.width
         && me.row >= tile.y
@@ -375,7 +418,9 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
 }
 
 fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, inside: bool) {
-    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
     let had_selection = s.selection.is_some();
     s.selection = None;
     s.mouse_down_at = inside.then(|| (me.row - tile.y, me.column - tile.x));
@@ -385,8 +430,12 @@ fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, insid
 }
 
 fn mouse_drag(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
-    let Some(s) = app.sessions.get_mut(app.focus) else { return };
-    let Some(anchor) = s.mouse_down_at else { return };
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
+    let Some(anchor) = s.mouse_down_at else {
+        return;
+    };
     let row = me.row - tile.y;
     let col = me.column - tile.x;
     let sel = s
@@ -406,7 +455,9 @@ fn mouse_wheel(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
         return;
     }
 
-    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
     let mode = s.parser.lock().ok().map(|p| *p.term.mode());
     let col = me.column.saturating_sub(tile.x) + 1;
     let row = me.row.saturating_sub(tile.y) + 1;
@@ -427,10 +478,18 @@ fn mouse_wheel(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
             ]
         }
         Some(m) if m.contains(TermMode::ALT_SCREEN) && m.contains(TermMode::ALTERNATE_SCROLL) => {
-            if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
+            if up {
+                b"\x1b[A".to_vec()
+            } else {
+                b"\x1b[B".to_vec()
+            }
         }
         _ => {
-            if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
+            if up {
+                b"\x1b[5~".to_vec()
+            } else {
+                b"\x1b[6~".to_vec()
+            }
         }
     };
     let _ = s.write(&seq);
@@ -441,11 +500,11 @@ fn mouse_release(app: &mut App) {
         s.mouse_down_at = None;
     }
     let in_scrollback = matches!(app.mode, Mode::Scrollback(_));
-    let Some(s) = app.sessions.get(app.focus) else { return };
+    let Some(s) = app.sessions.get(app.focus) else {
+        return;
+    };
     let Some(sel) = s.selection else { return };
-    let text = if in_scrollback
-        && let Some(sb) = &s.scrollback
-    {
+    let text = if in_scrollback && let Some(sb) = &s.scrollback {
         term_render::extract_selection(&sb.term, sel)
     } else if let Ok(p) = s.parser.lock() {
         term_render::extract_selection(&p.term, sel)
@@ -466,7 +525,9 @@ fn mouse_release(app: &mut App) {
 
 fn handle_paste(app: &mut App, text: &str) {
     use alacritty_terminal::term::TermMode;
-    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
     let bracketed = s
         .parser
         .lock()
@@ -508,7 +569,10 @@ fn log_key(key: &KeyEvent, prefix_pending: bool) {
 fn resize_all(app: &mut App) {
     let (term_rows, term_cols) = app.term_size;
     let sidebar_w: u16 = if app.show_sidebar { 32 } else { 0 };
-    let main_cols = term_cols.saturating_sub(sidebar_w).saturating_sub(2).max(10);
+    let main_cols = term_cols
+        .saturating_sub(sidebar_w)
+        .saturating_sub(2)
+        .max(10);
     let main_rows = term_rows.saturating_sub(3).max(4);
     if let Some(s) = app.sessions.get_mut(app.focus) {
         let _ = s.resize(main_rows, main_cols);
@@ -527,8 +591,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    let is_prefix_key = keys::PREFIX.matches(&key)
-        || matches!(key.code, KeyCode::Char('\u{01}'));
+    let is_prefix_key = keys::PREFIX.matches(&key) || matches!(key.code, KeyCode::Char('\u{01}'));
 
     if app.prefix_pending {
         app.prefix_pending = false;
@@ -682,7 +745,11 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
     } else if let KeyCode::Char(c) = key.code
         && c.is_ascii_digit()
     {
-        let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
+        let idx = if c == '0' {
+            9
+        } else {
+            (c as u8 - b'1') as usize
+        };
         if idx < app.sessions.len() {
             app.focus = idx;
             resize_all(app);
@@ -743,7 +810,9 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
         state.apply_filter();
         app.mode = Mode::Picker(state);
     } else if keys::PICKER_PICK.matches(&key) {
-        let chosen = state.current().map(|t| (t.cwd.clone(), t.session_id.clone()));
+        let chosen = state
+            .current()
+            .map(|t| (t.cwd.clone(), t.session_id.clone()));
         let dangerous = state.dangerous;
         if let Some((cwd, session_id)) = chosen {
             app.mode = Mode::Dashboard;
@@ -854,7 +923,9 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
 }
 
 fn move_focused(app: &mut App, delta: i32) {
-    if app.sessions.is_empty() { return; }
+    if app.sessions.is_empty() {
+        return;
+    }
     let to = util::wrap_index(app.focus, app.sessions.len(), delta);
     app.sessions.swap(app.focus, to);
     app.focus = to;

@@ -55,7 +55,9 @@ impl PickerState {
     }
     pub fn ensure_preview(&mut self) {
         let Some(t) = self.current() else { return };
-        if self.previews.contains_key(&t.session_id) { return; }
+        if self.previews.contains_key(&t.session_id) {
+            return;
+        }
         let id = t.session_id.clone();
         let path = dirs_path(&t.cwd, &id);
         let text = crate::transcripts::load_preview(&path, 40);
@@ -151,7 +153,10 @@ impl SpawnState {
             self.selected = 0;
             self.refresh();
             if let Some(name) = came_from
-                && let Some(idx) = self.entries.iter().position(|p| p.file_name() == Some(&name))
+                && let Some(idx) = self
+                    .entries
+                    .iter()
+                    .position(|p| p.file_name() == Some(&name))
             {
                 self.selected = idx;
             }
@@ -219,11 +224,21 @@ impl App {
         self.spawn_session_inner(cwd, dangerous, None)
     }
 
-    pub fn spawn_resume(&mut self, cwd: PathBuf, dangerous: bool, session_id: String) -> Result<()> {
+    pub fn spawn_resume(
+        &mut self,
+        cwd: PathBuf,
+        dangerous: bool,
+        session_id: String,
+    ) -> Result<()> {
         self.spawn_session_inner(cwd, dangerous, Some(session_id))
     }
 
-    fn spawn_session_inner(&mut self, cwd: PathBuf, dangerous: bool, resume: Option<String>) -> Result<()> {
+    fn spawn_session_inner(
+        &mut self,
+        cwd: PathBuf,
+        dangerous: bool,
+        resume: Option<String>,
+    ) -> Result<()> {
         let label = cwd
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -236,11 +251,7 @@ impl App {
             // Daemon-backed spawn: queue a mailbox, send Request::SpawnSession,
             // block on the mailbox for the SessionSpawned info.
             let mb = SpawnMailbox::new();
-            daemon
-                .pending_spawns
-                .lock()
-                .unwrap()
-                .push_back(mb.clone());
+            daemon.pending_spawns.lock().unwrap().push_back(mb.clone());
             daemon.request(cmux_proto::Request::SpawnSession {
                 cwd: cwd.clone(),
                 dangerous,
@@ -264,7 +275,9 @@ impl App {
             );
             daemon.register_slot(info.id, slot);
             // Subscribe so FrameDelta starts flowing for this session.
-            daemon.request(cmux_proto::Request::Subscribe { session_id: info.id })?;
+            daemon.request(cmux_proto::Request::Subscribe {
+                session_id: info.id,
+            })?;
             // Push initial resize so daemon sizes claude to our tile.
             daemon.request(cmux_proto::Request::Resize {
                 session_id: info.id,
@@ -306,7 +319,9 @@ impl App {
             daemon.req_tx.clone(),
         );
         daemon.register_slot(info.id, slot);
-        daemon.request(cmux_proto::Request::Subscribe { session_id: info.id })?;
+        daemon.request(cmux_proto::Request::Subscribe {
+            session_id: info.id,
+        })?;
         daemon.request(cmux_proto::Request::Attach {
             session_id: info.id,
             want_history: true,

@@ -14,7 +14,14 @@ use crate::ui::widgets::{kbd_chip, open_popup};
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
     let w = area.width.saturating_sub(4).clamp(64, 80);
     let h = area.height.saturating_sub(2).clamp(22, 30);
-    let inner = open_popup(f, area, w, h, " ⌘ cmux — cheat sheet ", theme::ACCENT_YELLOW);
+    let inner = open_popup(
+        f,
+        area,
+        w,
+        h,
+        " ⌘ cmux — cheat sheet ",
+        theme::ACCENT_YELLOW,
+    );
 
     let header = |s: &str| {
         Line::from(Span::styled(
@@ -53,11 +60,17 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
         row(keys::PREFIX_RENAME.label, "rename focused session"),
         row(keys::PREFIX_DETACH.label, "detach focused (with confirm)"),
         row(keys::PREFIX_SCROLLBACK.label, "enter scrollback mode"),
-        row(keys::PREFIX_REORDER.label, "enter reorder mode (move sessions)"),
+        row(
+            keys::PREFIX_REORDER.label,
+            "enter reorder mode (move sessions)",
+        ),
         row("↑↓", "cycle focused session"),
         row("1-9", "jump to session N"),
         row(keys::PREFIX_TOGGLE_SIDEBAR.label, "toggle sidebar"),
-        row(keys::PREFIX_SEND_CTRL_A.label, "send literal Ctrl+A to focused claude"),
+        row(
+            keys::PREFIX_SEND_CTRL_A.label,
+            "send literal Ctrl+A to focused claude",
+        ),
         row(keys::PREFIX_HELP.label, "this help"),
         row(keys::PREFIX_QUIT.label, "quit (kills all sessions)"),
         Line::from(""),
@@ -70,8 +83,14 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
         Line::from(""),
         header(" Sidebar badges"),
         note("⠋ green  busy (claude working)"),
-        note(&format!("{} cyan   idle (claude waiting for input)", theme::glyph::IDLE)),
-        note(&format!("{} red    permission prompt waiting", theme::glyph::PERMISSION)),
+        note(&format!(
+            "{} cyan   idle (claude waiting for input)",
+            theme::glyph::IDLE
+        )),
+        note(&format!(
+            "{} red    permission prompt waiting",
+            theme::glyph::PERMISSION
+        )),
         note(&format!("{} gray   dormant", theme::glyph::DORMANT)),
         note(&format!("{} red    session exited", theme::glyph::EXITED)),
         note(&format!("{} cyan   resumed session", theme::glyph::RESUMED)),

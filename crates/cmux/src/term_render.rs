@@ -289,9 +289,7 @@ impl<'a> Widget for TermWidget<'a> {
 fn convert_color(c: AlaColor, table: &[Option<RColor>; PALETTE_LEN]) -> RColor {
     match c {
         AlaColor::Spec(rgb) => rgb_to_ratatui(rgb),
-        AlaColor::Named(named) => {
-            table[named as usize].unwrap_or_else(|| named_to_ratatui(named))
-        }
+        AlaColor::Named(named) => table[named as usize].unwrap_or_else(|| named_to_ratatui(named)),
         AlaColor::Indexed(i) => {
             let idx = i as usize;
             if let Some(c) = table.get(idx).copied().flatten() {
@@ -412,8 +410,12 @@ mod tests {
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
         TermWidget::new(&term).render(area, &mut buf);
-        let row0: String = (0..5).map(|x| buf[(x, 0)].symbol().chars().next().unwrap()).collect();
-        let row1: String = (0..5).map(|x| buf[(x, 1)].symbol().chars().next().unwrap()).collect();
+        let row0: String = (0..5)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap())
+            .collect();
+        let row1: String = (0..5)
+            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap())
+            .collect();
         assert_eq!(row0, "hello");
         assert_eq!(row1, "world");
     }

@@ -263,7 +263,10 @@ impl Session {
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
-        let mut w = self.writer.lock().map_err(|_| anyhow::anyhow!("writer poisoned"))?;
+        let mut w = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("writer poisoned"))?;
         w.write_all(bytes)?;
         w.flush()?;
         Ok(())
@@ -271,14 +274,20 @@ impl Session {
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         {
-            let mut size = self.size.lock().map_err(|_| anyhow::anyhow!("size poisoned"))?;
+            let mut size = self
+                .size
+                .lock()
+                .map_err(|_| anyhow::anyhow!("size poisoned"))?;
             if *size == (rows, cols) {
                 return Ok(());
             }
             *size = (rows, cols);
         }
         {
-            let m = self.master.lock().map_err(|_| anyhow::anyhow!("master poisoned"))?;
+            let m = self
+                .master
+                .lock()
+                .map_err(|_| anyhow::anyhow!("master poisoned"))?;
             m.resize(PtySize {
                 rows,
                 cols,
@@ -302,16 +311,8 @@ impl Session {
     }
 
     pub fn info(&self) -> SessionInfo {
-        let label = self
-            .label
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default();
-        let (rows, cols) = self
-            .size
-            .lock()
-            .map(|s| *s)
-            .unwrap_or((24, 80));
+        let label = self.label.lock().map(|s| s.clone()).unwrap_or_default();
+        let (rows, cols) = self.size.lock().map(|s| *s).unwrap_or((24, 80));
         SessionInfo {
             id: self.id,
             label,

@@ -326,7 +326,11 @@ pub fn encode(key: KeyEvent) -> Option<Vec<u8>> {
                 out.push(b);
             } else {
                 let mut buf = [0u8; 4];
-                let s = if shift { c.to_uppercase().next().unwrap_or(c) } else { c };
+                let s = if shift {
+                    c.to_uppercase().next().unwrap_or(c)
+                } else {
+                    c
+                };
                 let s = s.encode_utf8(&mut buf);
                 out.extend_from_slice(s.as_bytes());
             }

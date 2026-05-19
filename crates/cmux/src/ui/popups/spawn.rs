@@ -16,7 +16,14 @@ use crate::ui::widgets::{collapse_cwd, kbd_chip, open_popup, selection_strip, vi
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
     let w = area.width.saturating_sub(8).clamp(50, 90);
     let h = area.height.saturating_sub(4).clamp(14, 28);
-    let inner = open_popup(f, area, w, h, " Spawn claude — pick a folder ", theme::ACCENT_CYAN);
+    let inner = open_popup(
+        f,
+        area,
+        w,
+        h,
+        " Spawn claude — pick a folder ",
+        theme::ACCENT_CYAN,
+    );
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -46,7 +53,12 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
     );
 
     draw_dir_list(f, layout[2], spawn);
-    draw_dangerous_panel(f, layout[4], spawn.dangerous, keys::SPAWN_TOGGLE_DANGER.label);
+    draw_dangerous_panel(
+        f,
+        layout[4],
+        spawn.dangerous,
+        keys::SPAWN_TOGGLE_DANGER.label,
+    );
     draw_hint_row(f, layout[6]);
 }
 
@@ -62,8 +74,11 @@ fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
         return;
     }
 
-    let (start, end) =
-        viewport_window(spawn.selected, spawn.entries.len(), list_area.height as usize);
+    let (start, end) = viewport_window(
+        spawn.selected,
+        spawn.entries.len(),
+        list_area.height as usize,
+    );
 
     for (offset, i) in (start..end).enumerate() {
         let row_y = list_area.y + offset as u16;

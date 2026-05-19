@@ -120,7 +120,12 @@ fn draw_sidebar_row(
     let cwd_str = collapse_cwd(&s.cwd.display().to_string());
     let lines: Vec<Line> = vec![
         Line::from(sidebar_header_spans(
-            s, idx, &badge_glyph, badge_color, alive, focused,
+            s,
+            idx,
+            &badge_glyph,
+            badge_color,
+            alive,
+            focused,
         )),
         Line::from(Span::styled(
             format!("    {}", truncate(&cwd_str, avail.saturating_sub(4))),
@@ -164,14 +169,27 @@ fn sidebar_header_spans(
                 .fg(badge_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("[{}]", idx + 1), Style::default().fg(theme::FG_MUTED)),
+        Span::styled(
+            format!("[{}]", idx + 1),
+            Style::default().fg(theme::FG_MUTED),
+        ),
         Span::raw(" "),
         Span::styled(
-            if s.resume_id.is_some() { theme::glyph::RESUMED } else { " " }.to_string(),
+            if s.resume_id.is_some() {
+                theme::glyph::RESUMED
+            } else {
+                " "
+            }
+            .to_string(),
             Style::default().fg(theme::ACCENT_CYAN),
         ),
         Span::styled(
-            if s.dangerous { theme::glyph::DANGER } else { " " }.to_string(),
+            if s.dangerous {
+                theme::glyph::DANGER
+            } else {
+                " "
+            }
+            .to_string(),
             Style::default().fg(theme::ACCENT_RED),
         ),
         Span::raw(" "),
@@ -237,7 +255,9 @@ fn draw_tile(
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             tile_title(session, alive, zoomed, display_num),
-            Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);

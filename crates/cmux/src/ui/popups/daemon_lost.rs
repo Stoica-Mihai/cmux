@@ -38,7 +38,9 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
         x: shadow_clip_x,
         y: shadow.y,
         width: shadow_clip_w.min(shadow.width),
-        height: shadow.height.min(area.height.saturating_sub(shadow.y - area.y)),
+        height: shadow
+            .height
+            .min(area.height.saturating_sub(shadow.y - area.y)),
     };
     f.render_widget(Clear, shadow_clip);
     f.render_widget(

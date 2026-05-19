@@ -20,12 +20,7 @@ pub(in crate::ui) fn draw_dangerous_panel(
     toggle_key: &'static str,
 ) {
     let (status_color, status_text, label_color, label_mod) = if active {
-        (
-            theme::ACCENT_RED,
-            "● ON",
-            theme::ACCENT_RED,
-            Modifier::BOLD,
-        )
+        (theme::ACCENT_RED, "● ON", theme::ACCENT_RED, Modifier::BOLD)
     } else {
         (theme::FG_DIM, "○ OFF", theme::FG, Modifier::empty())
     };
@@ -74,14 +69,29 @@ pub(in crate::ui) fn draw_dangerous_panel(
 
     f.render_widget(
         Paragraph::new(status_line).style(Style::default().bg(panel_bg)),
-        Rect { x: cols[0].x, y: mid_row, width: cols[0].width, height: 1 },
+        Rect {
+            x: cols[0].x,
+            y: mid_row,
+            width: cols[0].width,
+            height: 1,
+        },
     );
     f.render_widget(
         Paragraph::new(label_line).style(Style::default().bg(panel_bg)),
-        Rect { x: cols[1].x, y: mid_row, width: cols[1].width, height: 1 },
+        Rect {
+            x: cols[1].x,
+            y: mid_row,
+            width: cols[1].width,
+            height: 1,
+        },
     );
     f.render_widget(
         Paragraph::new(key_line).style(Style::default().bg(panel_bg)),
-        Rect { x: cols[2].x, y: mid_row, width: cols[2].width, height: 1 },
+        Rect {
+            x: cols[2].x,
+            y: mid_row,
+            width: cols[2].width,
+            height: 1,
+        },
     );
 }

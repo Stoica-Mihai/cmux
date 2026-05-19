@@ -27,7 +27,9 @@ pub(super) fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(theme::FG_DIM);
     let mut left_spans = vec![Span::styled(
         " ◆ cmux ",
-        Style::default().fg(brand_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(brand_color)
+            .add_modifier(Modifier::BOLD),
     )];
     if app.daemon.is_some() {
         left_spans.push(Span::raw(" "));
@@ -80,7 +82,12 @@ pub(super) fn draw_toast(f: &mut Frame, tile: Rect, text: &str) {
     if x < tile.x || y < tile.y {
         return;
     }
-    let rect = Rect { x, y, width: w, height: 1 };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: 1,
+    };
     let spans = vec![
         Span::styled("\u{E0B6}", Style::default().fg(theme::BG_ACTIVE)),
         Span::styled(
@@ -175,7 +182,8 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
             " RENAME ",
             format!(
                 "  type new name · {} save · {} cancel",
-                keys::RENAME_SAVE.label, keys::RENAME_CANCEL.label,
+                keys::RENAME_SAVE.label,
+                keys::RENAME_CANCEL.label,
             ),
             theme::ACCENT_YELLOW,
         ),
@@ -193,7 +201,8 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
             " CONFIRM ",
             format!(
                 "  {} detach · {} cancel",
-                keys::CONFIRM_YES.label, keys::CONFIRM_NO.label,
+                keys::CONFIRM_YES.label,
+                keys::CONFIRM_NO.label,
             ),
             theme::ACCENT_RED,
         ),
@@ -206,7 +215,8 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
             " REORDER ",
             format!(
                 "  {} move focused session · {} exit",
-                keys::REORDER_UP.label, keys::REORDER_EXIT.label,
+                keys::REORDER_UP.label,
+                keys::REORDER_EXIT.label,
             ),
             theme::ACCENT_MAGENTA,
         ),
@@ -234,4 +244,3 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         }
     }
 }
-

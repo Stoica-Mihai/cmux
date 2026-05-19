@@ -20,38 +20,39 @@ use crate::session::Session;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn log_path() -> Option<PathBuf> {
+fn log_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
-    Some(base.join("cmux").join("cmuxd.log"))
+    Some(base.join("cmux"))
 }
 
-/// Redirect stderr (and stdout) to ~/.local/state/cmux/cmuxd.log so daemon
-/// output survives across detached runs. Best-effort; failure leaves the
-/// original fds untouched.
-fn redirect_log() -> Option<PathBuf> {
-    use std::os::fd::AsRawFd;
-    let path = log_path()?;
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+/// Initialize structured logging to `~/.local/state/cmux/cmuxd.log` with daily
+/// rotation. Returns the appender guard so the caller can keep it alive for
+/// the lifetime of the daemon — dropping it flushes buffered records.
+///
+/// Honors `CMUXD_LOG` for level/filter overrides (e.g. `CMUXD_LOG=debug`,
+/// `CMUXD_LOG=cmuxd=trace,info`); defaults to `info` when unset.
+fn init_logging() -> Option<(tracing_appender::non_blocking::WorkerGuard, PathBuf)> {
+    use tracing_subscriber::EnvFilter;
+    let dir = log_dir()?;
+    let _ = fs::create_dir_all(&dir);
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("cmuxd")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&dir)
         .ok()?;
-    let fd = file.as_raw_fd();
-    unsafe {
-        unsafe extern "C" {
-            fn dup2(oldfd: std::ffi::c_int, newfd: std::ffi::c_int) -> std::ffi::c_int;
-        }
-        if dup2(fd, 1) < 0 || dup2(fd, 2) < 0 {
-            return None;
-        }
-    }
-    std::mem::forget(file);
-    Some(path)
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let filter = EnvFilter::try_from_env("CMUXD_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(false)
+        .init();
+    Some((guard, dir))
 }
 
 fn socket_dir() -> Result<PathBuf> {
@@ -60,8 +61,7 @@ fn socket_dir() -> Result<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|h| {
                 let uid = nix_compat_uid();
-                PathBuf::from(format!("/tmp/cmux-{}", uid))
-                    .join(h.to_string_lossy().to_string())
+                PathBuf::from(format!("/tmp/cmux-{}", uid)).join(h.to_string_lossy().to_string())
             })
         })
         .context("no XDG_RUNTIME_DIR or HOME")?;
@@ -128,9 +128,9 @@ impl Registry {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let log = redirect_log();
-    if let Some(p) = &log {
-        eprintln!("cmuxd: log -> {}", p.display());
+    let _log_guard = init_logging();
+    if let Some((_, ref p)) = _log_guard {
+        tracing::info!(dir = %p.display(), "log rotation -> daily");
     }
     let dir = socket_dir()?;
     fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
@@ -147,14 +147,13 @@ async fn main() -> Result<()> {
         let _ = fs::remove_file(&sock);
     }
 
-    let listener = UnixListener::bind(&sock)
-        .with_context(|| format!("bind {}", sock.display()))?;
+    let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600)).ok();
 
     let ready = ready_path()?;
     let _ = fs::write(&ready, std::process::id().to_string());
 
-    eprintln!("cmuxd v{} listening at {}", SERVER_VERSION, sock.display());
+    tracing::info!(version = SERVER_VERSION, socket = %sock.display(), "cmuxd listening");
 
     let registry = Arc::new(Registry::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -172,12 +171,12 @@ async fn main() -> Result<()> {
                             let reg = accept_registry.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_connection(stream, reg).await {
-                                    eprintln!("cmuxd: connection error: {e}");
+                                    tracing::warn!(error = %e, "connection error");
                                 }
                             });
                         }
                         Err(e) => {
-                            eprintln!("cmuxd: accept error: {e}");
+                            tracing::warn!(error = %e, "accept error");
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
@@ -188,10 +187,10 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         _ = signal::ctrl_c() => {
-            eprintln!("cmuxd: SIGINT received, shutting down");
+            tracing::info!(signal = "SIGINT", "shutting down");
         }
         _ = wait_sigterm() => {
-            eprintln!("cmuxd: SIGTERM received, shutting down");
+            tracing::info!(signal = "SIGTERM", "shutting down");
         }
     }
     let _ = shutdown_tx.send(());
@@ -238,15 +237,10 @@ async fn wait_sigterm() {
 
 /// Send SIGTERM to the current process so the main loop's shutdown path runs.
 /// Used by the Shutdown request handler.
-#[allow(unsafe_code)]
-unsafe fn libc_kill_self() {
-    // raise(SIGTERM) via libc — pull in a tiny extern decl rather than a
-    // whole libc dep.
-    unsafe extern "C" {
-        fn raise(sig: std::ffi::c_int) -> std::ffi::c_int;
-    }
-    const SIGTERM: std::ffi::c_int = 15;
-    unsafe { raise(SIGTERM) };
+/// Send SIGTERM to the current process so the main loop's shutdown path runs.
+/// Used by the Shutdown request handler.
+fn kill_self() {
+    let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM);
 }
 
 async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
@@ -271,7 +265,11 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
         Err(FrameError::Eof) => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Request::Hello { client_version, want_protocol } = first else {
+    let Request::Hello {
+        client_version,
+        want_protocol,
+    } = first
+    else {
         let _ = event_tx
             .send(Event::Goodbye {
                 reason: "expected Hello as first message".to_string(),
@@ -298,7 +296,7 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
             session_count: sc,
         })
         .await;
-    eprintln!("cmuxd: client {client_version} handshake ok");
+    tracing::info!(client = %client_version, "handshake ok");
 
     // Track subscriptions per connection; cancel forwarders on Unsubscribe / drop.
     let mut subscriptions: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -307,9 +305,7 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
         loop {
             match read_frame_async::<Request>(&mut read_half).await {
                 Ok(req) => {
-                    if let Err(e) =
-                        dispatch(req, &registry, &event_tx, &mut subscriptions).await
-                    {
+                    if let Err(e) = dispatch(req, &registry, &event_tx, &mut subscriptions).await {
                         let _ = event_tx
                             .send(Event::Error {
                                 request_id: None,
@@ -354,9 +350,7 @@ async fn dispatch(
         }
         Request::ListSessions => {
             let list = registry.list().await;
-            let _ = event_tx
-                .send(Event::SessionList { sessions: list })
-                .await;
+            let _ = event_tx.send(Event::SessionList { sessions: list }).await;
         }
         Request::SpawnSession {
             cwd,
@@ -409,9 +403,7 @@ async fn dispatch(
             if let Some(h) = subscriptions.remove(&session_id) {
                 h.abort();
             }
-            if !keep_session
-                && let Some(sess) = registry.remove(session_id).await
-            {
+            if !keep_session && let Some(sess) = registry.remove(session_id).await {
                 sess.kill();
                 let _ = event_tx
                     .send(Event::SessionExited {
@@ -537,9 +529,7 @@ async fn dispatch(
             drop(sessions);
             // Self-signal SIGTERM so the main shutdown path runs (cleans up
             // socket + ready file).
-            unsafe {
-                libc_kill_self();
-            }
+            kill_self();
         }
         Request::KillAll => {
             let sessions = registry.sessions.lock().await;
@@ -559,19 +549,13 @@ async fn read_frame_async<T: for<'de> serde::Deserialize<'de>>(
     stream: &mut tokio::net::unix::OwnedReadHalf,
 ) -> Result<T, FrameError> {
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .map_err(framing_io)?;
+    stream.read_exact(&mut len_buf).await.map_err(framing_io)?;
     let len = u32::from_le_bytes(len_buf);
     if len > cmux_proto::MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge(len));
     }
     let mut payload = vec![0u8; len as usize];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(framing_io)?;
+    stream.read_exact(&mut payload).await.map_err(framing_io)?;
     let msg = serde_json::from_slice(&payload)?;
     Ok(msg)
 }

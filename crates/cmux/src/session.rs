@@ -83,10 +83,8 @@ pub fn strip_alt_screen(input: &[u8]) -> Vec<u8> {
             if j < input.len() && (input[j] == b'h' || input[j] == b'l') {
                 let params = &input[i + 2..j];
                 let trailer = input[j];
-                if matches!(
-                    params,
-                    b"?1049" | b"?47" | b"?1047"
-                ) && (trailer == b'h' || trailer == b'l')
+                if matches!(params, b"?1049" | b"?47" | b"?1047")
+                    && (trailer == b'h' || trailer == b'l')
                 {
                     i = j + 1;
                     continue;
@@ -354,8 +352,7 @@ impl Session {
         let byte_ring: Arc<Mutex<VecDeque<u8>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
         let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
-        let pending_status: Arc<Mutex<Option<PendingStatus>>> =
-            Arc::new(Mutex::new(None));
+        let pending_status: Arc<Mutex<Option<PendingStatus>>> = Arc::new(Mutex::new(None));
         let slot = DaemonSlot {
             parser: parser.clone(),
             byte_ring: byte_ring.clone(),
@@ -465,7 +462,9 @@ impl Session {
     }
 
     fn detect_permission_prompt(&self) -> bool {
-        let Ok(p) = self.parser.lock() else { return false };
+        let Ok(p) = self.parser.lock() else {
+            return false;
+        };
         let text = term_render::visible_text(&p.term);
         debug_log!(
             &format!("/tmp/cmux-screen-{}.txt", self.id),

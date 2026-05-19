@@ -13,6 +13,7 @@ alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
 chrono = { workspace = true }
+clap = { workspace = true }
 crossterm = { workspace = true }
 portable-pty = { workspace = true }
 ratatui = { workspace = true }

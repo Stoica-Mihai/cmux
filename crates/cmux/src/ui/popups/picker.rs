@@ -44,7 +44,12 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
     draw_filter_line(f, vertical[0], state);
     draw_list_and_preview(f, vertical[1], state);
     // vertical[2] is an intentionally empty 1-row gap for breathing space.
-    draw_dangerous_panel(f, vertical[3], state.dangerous, keys::PICKER_TOGGLE_DANGER.label);
+    draw_dangerous_panel(
+        f,
+        vertical[3],
+        state.dangerous,
+        keys::PICKER_TOGGLE_DANGER.label,
+    );
     f.render_widget(
         Paragraph::new(Span::styled(
             format!(
@@ -149,7 +154,9 @@ fn draw_rows(f: &mut Frame, list_area: Rect, state: &PickerState) {
         if row_y >= list_area.y + list_area.height {
             break;
         }
-        let Some(t) = state.items.get(i).and_then(|idx| state.all.get(*idx)) else { continue };
+        let Some(t) = state.items.get(i).and_then(|idx| state.all.get(*idx)) else {
+            continue;
+        };
         let row_rect = Rect {
             x: list_area.x,
             y: row_y,
@@ -157,7 +164,15 @@ fn draw_rows(f: &mut Frame, list_area: Rect, state: &PickerState) {
             height: 1,
         };
         row_y += 1;
-        draw_row(f, row_rect, t, i == state.selected, has_any_title, NAME_W, cwd_w);
+        draw_row(
+            f,
+            row_rect,
+            t,
+            i == state.selected,
+            has_any_title,
+            NAME_W,
+            cwd_w,
+        );
     }
 }
 
@@ -182,7 +197,11 @@ fn draw_row(
     };
     let cwd_str = collapse_cwd(&t.cwd.display().to_string());
     let cwd_cell = pad_right(&truncate(&cwd_str, cwd_w), cwd_w);
-    let fg = if is_sel { theme::BORDER_FOCUS } else { theme::FG };
+    let fg = if is_sel {
+        theme::BORDER_FOCUS
+    } else {
+        theme::FG
+    };
     let row_style = if is_sel {
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
     } else {

@@ -30,13 +30,19 @@ pub fn slug_decode(dir: &Path) -> PathBuf {
 }
 
 pub fn scan() -> Vec<Transcript> {
-    let Some(root) = claude_projects_dir() else { return Vec::new() };
-    let Ok(read_root) = std::fs::read_dir(&root) else { return Vec::new() };
+    let Some(root) = claude_projects_dir() else {
+        return Vec::new();
+    };
+    let Ok(read_root) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
 
     let mut out: Vec<Transcript> = Vec::new();
     for entry in read_root.flatten() {
         let proj_dir = entry.path();
-        let Ok(read_proj) = std::fs::read_dir(&proj_dir) else { continue };
+        let Ok(read_proj) = std::fs::read_dir(&proj_dir) else {
+            continue;
+        };
         for f in read_proj.flatten() {
             let p = f.path();
             if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -70,12 +76,16 @@ pub fn scan() -> Vec<Transcript> {
 /// the picker scan I/O-bound on the directory walk, not on per-file reads.
 fn extract_header(path: &Path) -> (Option<PathBuf>, Option<String>) {
     use std::io::{BufRead, BufReader};
-    let Ok(f) = std::fs::File::open(path) else { return (None, None) };
+    let Ok(f) = std::fs::File::open(path) else {
+        return (None, None);
+    };
     let reader = BufReader::new(f);
     let mut cwd: Option<PathBuf> = None;
     let mut title: Option<String> = None;
     for line in reader.lines().take(40).map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if cwd.is_none()
             && let Some(c) = v.get("cwd").and_then(|x| x.as_str())
             && !c.is_empty()
@@ -142,7 +152,11 @@ pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
         let role = v
             .get("type")
             .and_then(|x| x.as_str())
-            .or_else(|| v.get("message").and_then(|m| m.get("role")).and_then(|x| x.as_str()))
+            .or_else(|| {
+                v.get("message")
+                    .and_then(|m| m.get("role"))
+                    .and_then(|x| x.as_str())
+            })
             .unwrap_or("?");
         let label = match role {
             "user" => "▸ user",
