@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="100" viewBox="0 0 240 100" role="img" aria-label="cmux">
+  <title>cmux</title>
+  <!-- Anthropic starburst, sunset color tuned for dark backgrounds -->
+  <g transform="translate(28 50) scale(0.30)" fill="#d97757">
+    <rect x="-3" y="-46" width="6" height="92" rx="3"/>
+    <rect x="-46" y="-3" width="92" height="6" rx="3"/>
+    <g transform="rotate(45)">
+      <rect x="-2.2" y="-32" width="4.4" height="64" rx="2.2"/>
+      <rect x="-32" y="-2.2" width="64" height="4.4" rx="2.2"/>
+    </g>
+  </g>
+  <!-- Wordmark -->
+  <text x="60" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="56" font-weight="700" fill="#d97757">cmux</text>
+  <!-- Block cursor -->
+  <rect x="206" y="32" width="20" height="40" fill="#d97757"/>
+</svg>
