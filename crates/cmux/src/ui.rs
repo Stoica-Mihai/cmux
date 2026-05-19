@@ -425,7 +425,7 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         Line::from(vec![
             Span::styled(" filter: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "(type to search by cwd)",
+                "(type to search by cwd or --name)",
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
             ),
         ])
@@ -481,7 +481,13 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
             Style::default().fg(Color::DarkGray),
         )));
     }
-    let cwd_w = (list_area.width as usize).saturating_sub(32).max(15);
+    const NAME_W: usize = 14;
+    let has_any_title = state.all.iter().any(|t| t.custom_title.is_some());
+    let name_block = if has_any_title { NAME_W + 2 } else { 0 };
+    let cwd_w = (list_area.width as usize)
+        .saturating_sub(32)
+        .saturating_sub(name_block)
+        .max(15);
     let mut row_y = list_area.y;
     for i in start..end {
         if row_y >= list_area.y + list_area.height {
@@ -520,26 +526,44 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         let cwd_str = collapse_cwd(&t.cwd.display().to_string());
         let size_kb = t.file_size / 1024;
         let cwd_cell = pad_right(&truncate(&cwd_str, cwd_w), cwd_w);
-        let label = format!(
-            "{}  {:>8}  {:>7}KB  {}",
-            cwd_cell,
-            age,
-            size_kb,
-            &t.session_id[..8.min(t.session_id.len())],
-        );
         let fg = if is_sel {
             theme::BORDER_FOCUS
         } else {
             theme::FG
         };
-        let style = if is_sel {
-            Style::default()
-                .fg(fg)
-                .add_modifier(Modifier::BOLD)
+        let row_style = if is_sel {
+            Style::default().fg(fg).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(fg)
         };
-        f.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), text_rect);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if has_any_title {
+            let name_cell = match &t.custom_title {
+                Some(n) => pad_right(&truncate(n, NAME_W), NAME_W),
+                None => " ".repeat(NAME_W),
+            };
+            let name_style = if t.custom_title.is_some() {
+                Style::default()
+                    .fg(theme::ACCENT_MAGENTA)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(theme::FG_DIM)
+            };
+            spans.push(Span::styled(name_cell, name_style));
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!(
+                "{}  {:>8}  {:>7}KB  {}",
+                cwd_cell,
+                age,
+                size_kb,
+                &t.session_id[..8.min(t.session_id.len())],
+            ),
+            row_style,
+        ));
+        f.render_widget(Paragraph::new(Line::from(spans)), text_rect);
     }
     let _ = lines;
 

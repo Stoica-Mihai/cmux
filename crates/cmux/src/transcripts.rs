@@ -8,6 +8,9 @@ pub struct Transcript {
     pub cwd: PathBuf,
     pub mtime: SystemTime,
     pub file_size: u64,
+    /// Display name set via `claude --name <name>`. Stored in the first lines
+    /// of the JSONL as `{"type":"custom-title","customTitle":"..."}`.
+    pub custom_title: Option<String>,
 }
 
 pub fn slug_encode(cwd: &Path) -> String {
@@ -46,12 +49,14 @@ pub fn scan() -> Vec<Transcript> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let cwd = extract_cwd(&p).unwrap_or_else(|| slug_decode(&proj_dir));
+            let (cwd, custom_title) = extract_header(&p);
+            let cwd = cwd.unwrap_or_else(|| slug_decode(&proj_dir));
             out.push(Transcript {
                 session_id,
                 cwd,
                 mtime,
                 file_size: size,
+                custom_title,
             });
         }
     }
@@ -59,19 +64,36 @@ pub fn scan() -> Vec<Transcript> {
     out
 }
 
-fn extract_cwd(path: &Path) -> Option<PathBuf> {
+/// Read the early portion of a transcript and pull both the recorded cwd and
+/// the optional `--name`-supplied custom title. Both fields tend to appear in
+/// the first handful of records; scanning the same 40-line window once keeps
+/// the picker scan I/O-bound on the directory walk, not on per-file reads.
+fn extract_header(path: &Path) -> (Option<PathBuf>, Option<String>) {
     use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).ok()?;
+    let Ok(f) = std::fs::File::open(path) else { return (None, None) };
     let reader = BufReader::new(f);
-    for line in reader.lines().take(40).flatten() {
-        let v: serde_json::Value = serde_json::from_str(&line).ok()?;
-        if let Some(cwd) = v.get("cwd").and_then(|x| x.as_str())
-            && !cwd.is_empty()
+    let mut cwd: Option<PathBuf> = None;
+    let mut title: Option<String> = None;
+    for line in reader.lines().take(40).map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if cwd.is_none()
+            && let Some(c) = v.get("cwd").and_then(|x| x.as_str())
+            && !c.is_empty()
         {
-            return Some(PathBuf::from(cwd));
+            cwd = Some(PathBuf::from(c));
+        }
+        if title.is_none()
+            && v.get("type").and_then(|x| x.as_str()) == Some("custom-title")
+            && let Some(t) = v.get("customTitle").and_then(|x| x.as_str())
+            && !t.is_empty()
+        {
+            title = Some(t.to_string());
+        }
+        if cwd.is_some() && title.is_some() {
+            break;
         }
     }
-    None
+    (cwd, title)
 }
 
 pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {

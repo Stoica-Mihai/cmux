@@ -70,7 +70,17 @@ impl PickerState {
                 .all
                 .iter()
                 .enumerate()
-                .filter(|(_, t)| t.cwd.display().to_string().to_lowercase().contains(&q))
+                .filter(|(_, t)| {
+                    if t.cwd.display().to_string().to_lowercase().contains(&q) {
+                        return true;
+                    }
+                    if let Some(name) = &t.custom_title
+                        && name.to_lowercase().contains(&q)
+                    {
+                        return true;
+                    }
+                    false
+                })
                 .map(|(i, _)| i)
                 .collect();
         }
