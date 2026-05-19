@@ -143,18 +143,14 @@ fn drive_main_loop(
             break;
         }
 
-        // Daemon dropped: exit cleanly. Show a brief toast first.
-        if let Some(d) = &app.daemon
+        // Daemon dropped: flip into the daemon-lost modal. Renders next frame
+        // via ui::draw; any keypress exits via handle_key's daemon-lost path.
+        if !app.daemon_lost
+            && let Some(d) = &app.daemon
             && !d.alive.load(std::sync::atomic::Ordering::SeqCst)
         {
-            app.toast = Some(app::Toast {
-                text: "cmuxd connection lost".to_string(),
-                expires_at_ms: util::now_ms() + 1500,
-            });
+            app.daemon_lost = true;
             app.needs_redraw = true;
-            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
-            std::thread::sleep(Duration::from_millis(900));
-            break;
         }
     }
 
@@ -559,6 +555,12 @@ fn resize_all(app: &mut App) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Daemon-lost modal: swallow all keys, any key dismisses + quits.
+    if app.daemon_lost {
+        let _ = key;
+        app.should_quit = true;
+        return Ok(());
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
         app.should_quit = true;
         return Ok(());

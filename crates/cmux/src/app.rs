@@ -173,6 +173,7 @@ pub struct App {
     pub render_tick: u64,
     pub toast: Option<Toast>,
     pub daemon: Option<Arc<DaemonHandle>>,
+    pub daemon_lost: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +201,7 @@ impl App {
             render_tick: 0,
             toast: None,
             daemon: None,
+            daemon_lost: false,
         }
     }
 
