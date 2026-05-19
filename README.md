@@ -5,8 +5,6 @@
   </picture>
 </p>
 
-# cmux
-
 A tmux-like TUI for running and watching many `claude` sessions side-by-side, each rooted in a different folder, with a per-session `--dangerously-skip-permissions` toggle.
 
 Pure Rust. No tmux required.
