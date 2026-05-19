@@ -11,7 +11,9 @@ use crate::keys;
 use crate::theme;
 
 use crate::ui::popups::dangerous::draw_dangerous_panel;
-use crate::ui::widgets::{collapse_cwd, pad_right, titled_block, truncate};
+use crate::ui::widgets::{
+    collapse_cwd, pad_right, selection_strip, titled_block, truncate, viewport_window,
+};
 
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
     let popup = Rect {
@@ -139,14 +141,8 @@ fn draw_rows(f: &mut Frame, list_area: Rect, state: &PickerState) {
         return;
     }
 
-    let visible = list_area.height as usize;
-    let total = state.items.len();
-    let start = if state.selected >= visible {
-        state.selected + 1 - visible
-    } else {
-        0
-    };
-    let end = (start + visible).min(total);
+    let (start, end) =
+        viewport_window(state.selected, state.items.len(), list_area.height as usize);
 
     let mut row_y = list_area.y;
     for i in start..end {
@@ -175,15 +171,7 @@ fn draw_row(
     cwd_w: usize,
 ) {
     if is_sel {
-        let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
-        f.render_widget(bg, row_rect);
-        let strip_style = Style::default()
-            .fg(theme::ACCENT_MAGENTA)
-            .bg(theme::BG_ACTIVE);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("▎", strip_style))),
-            Rect { width: 1, ..row_rect },
-        );
+        selection_strip(f, row_rect, theme::ACCENT_MAGENTA);
     }
 
     let text_rect = Rect {

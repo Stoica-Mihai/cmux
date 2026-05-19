@@ -11,7 +11,7 @@ use crate::session::{ClaudeStatus, Session};
 use crate::term_render::TermWidget;
 use crate::theme;
 
-use super::widgets::{collapse_cwd, titled_block, truncate};
+use super::widgets::{collapse_cwd, selection_strip, titled_block, truncate};
 
 pub(super) fn draw_dashboard(
     f: &mut Frame,
@@ -106,18 +106,7 @@ fn draw_sidebar_row(
     let (badge_glyph, badge_color) = sidebar_badge(s, alive, age_ms, render_tick);
 
     if focused {
-        let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
-        f.render_widget(bg, row_area);
-        let strip_style = Style::default()
-            .fg(theme::BORDER_FOCUS)
-            .bg(theme::BG_ACTIVE);
-        let strip_lines: Vec<Line> = (0..row_area.height)
-            .map(|_| Line::from(Span::styled("▎", strip_style)))
-            .collect();
-        f.render_widget(
-            Paragraph::new(strip_lines),
-            Rect { x: row_area.x, y: row_area.y, width: 1, height: row_area.height },
-        );
+        selection_strip(f, row_area, theme::BORDER_FOCUS);
     }
 
     let text_area = Rect {
@@ -128,37 +117,11 @@ fn draw_sidebar_row(
     };
     let avail = text_area.width as usize;
 
-    let label_style = if !alive {
-        Style::default().fg(theme::ACCENT_RED).add_modifier(Modifier::DIM)
-    } else if focused {
-        Style::default().fg(theme::BORDER_FOCUS).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::FG)
-    };
-    let state_suffix = if !alive { " (exited)" } else { "" };
-
-    let header: Vec<Span> = vec![
-        Span::styled(
-            format!("{} ", badge_glyph),
-            Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("[{}]", idx + 1), Style::default().fg(theme::FG_MUTED)),
-        Span::raw(" "),
-        Span::styled(
-            if s.resume_id.is_some() { "↺" } else { " " }.to_string(),
-            Style::default().fg(theme::ACCENT_CYAN),
-        ),
-        Span::styled(
-            if s.dangerous { "⚠" } else { " " }.to_string(),
-            Style::default().fg(theme::ACCENT_RED),
-        ),
-        Span::raw(" "),
-        Span::styled(format!("{}{}", s.label, state_suffix), label_style),
-    ];
-
     let cwd_str = collapse_cwd(&s.cwd.display().to_string());
     let lines: Vec<Line> = vec![
-        Line::from(header),
+        Line::from(sidebar_header_spans(
+            s, idx, &badge_glyph, badge_color, alive, focused,
+        )),
         Line::from(Span::styled(
             format!("    {}", truncate(&cwd_str, avail.saturating_sub(4))),
             Style::default().fg(theme::FG_DIM),
@@ -171,15 +134,60 @@ fn draw_sidebar_row(
     f.render_widget(Paragraph::new(lines), text_area);
 }
 
+/// Build the top line of a sidebar row: badge, index, optional resume/danger
+/// glyphs, and the session label. Style is gated by alive/focused so callers
+/// don't have to recompute it.
+fn sidebar_header_spans(
+    s: &Session,
+    idx: usize,
+    badge_glyph: &str,
+    badge_color: Color,
+    alive: bool,
+    focused: bool,
+) -> Vec<Span<'static>> {
+    let label_style = if !alive {
+        Style::default()
+            .fg(theme::ACCENT_RED)
+            .add_modifier(Modifier::DIM)
+    } else if focused {
+        Style::default()
+            .fg(theme::BORDER_FOCUS)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::FG)
+    };
+    let state_suffix = if !alive { " (exited)" } else { "" };
+    vec![
+        Span::styled(
+            format!("{} ", badge_glyph),
+            Style::default()
+                .fg(badge_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("[{}]", idx + 1), Style::default().fg(theme::FG_MUTED)),
+        Span::raw(" "),
+        Span::styled(
+            if s.resume_id.is_some() { theme::glyph::RESUMED } else { " " }.to_string(),
+            Style::default().fg(theme::ACCENT_CYAN),
+        ),
+        Span::styled(
+            if s.dangerous { theme::glyph::DANGER } else { " " }.to_string(),
+            Style::default().fg(theme::ACCENT_RED),
+        ),
+        Span::raw(" "),
+        Span::styled(format!("{}{}", s.label, state_suffix), label_style),
+    ]
+}
+
 /// Pure status-glyph picker for sidebar rows. Order matters: exit > prompt >
 /// busy > idle > recent > dormant. Lives outside [`draw_sidebar_row`] so it
 /// can be exercised without a `Frame`.
 fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (String, Color) {
     if !alive {
-        return ("✕".into(), theme::ACCENT_RED);
+        return (theme::glyph::EXITED.into(), theme::ACCENT_RED);
     }
     if s.permission_pending {
-        return ("⚠".into(), theme::ACCENT_RED);
+        return (theme::glyph::PERMISSION.into(), theme::ACCENT_RED);
     }
     let busy = s.claude_status == ClaudeStatus::Busy || age_ms < 1500;
     if busy {
@@ -189,12 +197,12 @@ fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (St
         );
     }
     if s.claude_status == ClaudeStatus::Idle {
-        return ("○".into(), theme::ACCENT_CYAN);
+        return (theme::glyph::IDLE.into(), theme::ACCENT_CYAN);
     }
     if age_ms < 30_000 {
-        return ("○".into(), theme::ACCENT_YELLOW);
+        return (theme::glyph::IDLE.into(), theme::ACCENT_YELLOW);
     }
-    ("·".into(), theme::FG_DIM)
+    (theme::glyph::DORMANT.into(), theme::FG_DIM)
 }
 
 fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
@@ -317,7 +325,11 @@ fn tile_cursor_bg(session: &Session) -> Color {
 }
 
 fn tile_title(session: &Session, alive: bool, zoomed: bool, display_num: usize) -> String {
-    let danger = if session.dangerous { " ⚠ " } else { " " };
+    let danger = if session.dangerous {
+        format!(" {} ", theme::glyph::DANGER)
+    } else {
+        " ".to_string()
+    };
     let zoom_marker = if zoomed { "↕ " } else { "" };
     let state = if !alive { " EXITED" } else { "" };
     format!(

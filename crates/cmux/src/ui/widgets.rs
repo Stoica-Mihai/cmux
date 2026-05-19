@@ -5,10 +5,46 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders, Clear};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::theme;
+
+/// Compute the visible `[start, end)` index range for a single-column list
+/// given the selected index, total item count, and viewport row count. Keeps
+/// the selection on-screen by sliding the window forward when `selected`
+/// would otherwise fall past the bottom edge. Centralizes the `selected + 1
+/// - visible` arithmetic shared by the picker and spawn dir-list.
+pub(super) fn viewport_window(selected: usize, total: usize, height: usize) -> (usize, usize) {
+    let start = if selected >= height {
+        selected + 1 - height
+    } else {
+        0
+    };
+    let end = (start + height).min(total);
+    (start, end)
+}
+
+/// Highlight a list row: muted background + a 1-cell accent-colored bar
+/// running its full height. Works for single-row and multi-row selections
+/// (sidebar uses height=3); callers gate on their own selection predicate.
+pub(super) fn selection_strip(f: &mut Frame, row_area: Rect, accent: Color) {
+    let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
+    f.render_widget(bg, row_area);
+    let strip_style = Style::default().fg(accent).bg(theme::BG_ACTIVE);
+    let lines: Vec<Line> = (0..row_area.height)
+        .map(|_| Line::from(Span::styled("▎", strip_style)))
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            x: row_area.x,
+            y: row_area.y,
+            width: 1,
+            height: row_area.height,
+        },
+    );
+}
 
 /// Solid rounded chip with a single label run.
 pub(super) fn chip(label: &str, bg: Color) -> Vec<Span<'static>> {

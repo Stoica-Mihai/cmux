@@ -4,14 +4,14 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::SpawnState;
 use crate::keys;
 use crate::theme;
 
 use crate::ui::popups::dangerous::draw_dangerous_panel;
-use crate::ui::widgets::{collapse_cwd, kbd_chip, open_popup};
+use crate::ui::widgets::{collapse_cwd, kbd_chip, open_popup, selection_strip, viewport_window};
 
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
     let w = area.width.saturating_sub(8).clamp(50, 90);
@@ -62,14 +62,8 @@ fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
         return;
     }
 
-    let visible = list_area.height as usize;
-    let total = spawn.entries.len();
-    let start = if spawn.selected >= visible {
-        spawn.selected + 1 - visible
-    } else {
-        0
-    };
-    let end = (start + visible).min(total);
+    let (start, end) =
+        viewport_window(spawn.selected, spawn.entries.len(), list_area.height as usize);
 
     for (offset, i) in (start..end).enumerate() {
         let row_y = list_area.y + offset as u16;
@@ -92,15 +86,7 @@ fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
 
 fn draw_dir_row(f: &mut Frame, row_rect: Rect, name: &str, is_sel: bool) {
     if is_sel {
-        let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
-        f.render_widget(bg, row_rect);
-        let strip_style = Style::default()
-            .fg(theme::ACCENT_CYAN)
-            .bg(theme::BG_ACTIVE);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("▎", strip_style))),
-            Rect { width: 1, ..row_rect },
-        );
+        selection_strip(f, row_rect, theme::ACCENT_CYAN);
     }
     let text_rect = Rect {
         x: row_rect.x + 2,

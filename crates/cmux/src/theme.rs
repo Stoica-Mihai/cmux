@@ -27,3 +27,17 @@ const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦
 pub fn spinner_frame(tick: u64) -> char {
     SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize]
 }
+
+/// Single-char status badges used across the sidebar + tile chrome. Keeping
+/// them as named consts means the legend in `popups::help` and the row
+/// renderer in `dashboard` agree by reference, not by coincidence.
+pub mod glyph {
+    pub const IDLE: &str = "○";
+    pub const DORMANT: &str = "·";
+    pub const EXITED: &str = "✕";
+    pub const RESUMED: &str = "↺";
+    /// Permission prompt waiting on user (claude blocked).
+    pub const PERMISSION: &str = "⚠";
+    /// Session launched with `--dangerously-skip-permissions`.
+    pub const DANGER: &str = "⚠";
+}
