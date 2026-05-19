@@ -26,10 +26,7 @@ impl Client {
             want_protocol: PROTOCOL_VERSION,
         })?;
         match this.recv()? {
-            Event::Welcome { server_version, protocol, session_count } => {
-                eprintln!(
-                    "cmux: connected to cmuxd v{server_version} (protocol {protocol}, {session_count} sessions)"
-                );
+            Event::Welcome { protocol, .. } => {
                 if protocol != PROTOCOL_VERSION {
                     anyhow::bail!("protocol skew: server={} client={}", protocol, PROTOCOL_VERSION);
                 }
