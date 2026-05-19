@@ -208,10 +208,6 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
                 }
             }
             // Reader done: mark daemon dead + cascade to all slots.
-            let _ = std::fs::write(
-                "/tmp/cmux-daemon-reader.log",
-                format!("reader thread exited at {}\n", now_ms()),
-            );
             alive_for_reader.store(false, Ordering::SeqCst);
             if let Ok(m) = slots_for_reader.lock() {
                 for slot in m.values() {
