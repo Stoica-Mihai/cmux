@@ -96,6 +96,20 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
             " ◆ cmux ",
             Style::default().fg(brand_color).add_modifier(Modifier::BOLD),
         ),
+    ];
+    if app.daemon.is_some() {
+        left_spans.push(Span::raw(" "));
+        left_spans.extend(chip(" ⚡ cmuxd ", theme::ACCENT_GREEN));
+    } else {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled(
+            "local",
+            Style::default()
+                .fg(theme::FG_DIM)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    left_spans.extend(vec![
         Span::styled(" · ", dim),
         Span::styled(
             pos,
@@ -106,7 +120,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  ·  ", dim),
         Span::styled("focus ", dim),
         Span::styled(focus_label, value),
-    ];
+    ]);
 
     let clock = current_clock_string();
     let clock_chars = clock.chars().count() as u16;
