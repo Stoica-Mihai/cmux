@@ -285,7 +285,9 @@ async fn dispatch(
         }
         Request::ListSessions => {
             let list = registry.list().await;
-            let _ = event_tx.send(Event::SessionList(list)).await;
+            let _ = event_tx
+                .send(Event::SessionList { sessions: list })
+                .await;
         }
         Request::SpawnSession {
             cwd,

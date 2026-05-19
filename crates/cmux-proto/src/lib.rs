@@ -108,7 +108,9 @@ pub enum Event {
         protocol: u32,
         session_count: usize,
     },
-    SessionList(Vec<SessionInfo>),
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
     SessionSpawned {
         id: u64,
         info: SessionInfo,

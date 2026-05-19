@@ -38,9 +38,9 @@ fn main() -> Result<()> {
         let mut c = client::Client::connect(&path)?;
         c.send(&cmux_proto::Request::ListSessions)?;
         match c.recv()? {
-            cmux_proto::Event::SessionList(list) => {
-                eprintln!("cmux: {} sessions on daemon", list.len());
-                for s in list {
+            cmux_proto::Event::SessionList { sessions } => {
+                eprintln!("cmux: {} sessions on daemon", sessions.len());
+                for s in sessions {
                     eprintln!("  [{}] {} ({})", s.id, s.label, s.cwd.display());
                 }
             }
