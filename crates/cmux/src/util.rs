@@ -1,7 +1,18 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PREFIX_HINT: &str = "Ctrl+A then n/l/↑↓/d/z/q";
+pub fn prefix_hint() -> String {
+    use crate::keys;
+    format!(
+        "{} then {}/{}/↑↓/{}/{}/{}",
+        keys::PREFIX.label,
+        keys::PREFIX_SPAWN.label,
+        keys::PREFIX_PICKER.label,
+        keys::PREFIX_DETACH.label,
+        keys::PREFIX_TOGGLE_SIDEBAR.label,
+        keys::PREFIX_QUIT.label,
+    )
+}
 
 pub fn now_ms() -> u64 {
     SystemTime::now()

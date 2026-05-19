@@ -20,6 +20,40 @@ use crate::session::Session;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn log_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    Some(base.join("cmux").join("cmuxd.log"))
+}
+
+/// Redirect stderr (and stdout) to ~/.local/state/cmux/cmuxd.log so daemon
+/// output survives across detached runs. Best-effort; failure leaves the
+/// original fds untouched.
+fn redirect_log() -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    let path = log_path()?;
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let fd = file.as_raw_fd();
+    unsafe {
+        unsafe extern "C" {
+            fn dup2(oldfd: std::ffi::c_int, newfd: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        if dup2(fd, 1) < 0 || dup2(fd, 2) < 0 {
+            return None;
+        }
+    }
+    std::mem::forget(file);
+    Some(path)
+}
+
 fn socket_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -94,6 +128,10 @@ impl Registry {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    let log = redirect_log();
+    if let Some(p) = &log {
+        eprintln!("cmuxd: log -> {}", p.display());
+    }
     let dir = socket_dir()?;
     fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).ok();

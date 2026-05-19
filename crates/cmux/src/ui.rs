@@ -272,7 +272,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
     let h = area.height.saturating_sub(2).clamp(22, 30);
     let inner = open_popup(f, area, w, h, " ⌘ cmux — cheat sheet ", theme::ACCENT_YELLOW);
 
-    let header = |s: &'static str| {
+    let header = |s: &str| {
         Line::from(Span::styled(
             s.to_string(),
             Style::default()
@@ -303,22 +303,22 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
     };
 
     let lines: Vec<Line> = vec![
-        header(" Prefix chords  (Ctrl+A then…)"),
-        row("n", "spawn new claude in a folder"),
-        row("l", "resume picker (past sessions)"),
-        row("r", "rename focused session"),
-        row("d", "detach focused (with confirm)"),
-        row("[", "enter scrollback mode"),
-        row("m", "enter reorder mode (move sessions)"),
+        header(&format!(" Prefix chords  ({} then…)", crate::keys::PREFIX.label)),
+        row(crate::keys::PREFIX_SPAWN.label, "spawn new claude in a folder"),
+        row(crate::keys::PREFIX_PICKER.label, "resume picker (past sessions)"),
+        row(crate::keys::PREFIX_RENAME.label, "rename focused session"),
+        row(crate::keys::PREFIX_DETACH.label, "detach focused (with confirm)"),
+        row(crate::keys::PREFIX_SCROLLBACK.label, "enter scrollback mode"),
+        row(crate::keys::PREFIX_REORDER.label, "enter reorder mode (move sessions)"),
         row("↑↓", "cycle focused session"),
         row("1-9", "jump to session N"),
-        row("z", "toggle sidebar"),
-        row("a", "send literal Ctrl+A to focused claude"),
-        row("?", "this help"),
-        row("q", "quit (kills all sessions)"),
+        row(crate::keys::PREFIX_TOGGLE_SIDEBAR.label, "toggle sidebar"),
+        row(crate::keys::PREFIX_SEND_CTRL_A.label, "send literal Ctrl+A to focused claude"),
+        row(crate::keys::PREFIX_HELP.label, "this help"),
+        row(crate::keys::PREFIX_QUIT.label, "quit (kills all sessions)"),
         Line::from(""),
         header(" Global"),
-        row("Ctrl+Q", "hard quit from anywhere"),
+        row(crate::keys::HARD_QUIT.label, "hard quit from anywhere"),
         Line::from(""),
         header(" Mouse"),
         row("drag", "copy selection via OSC 52"),
@@ -363,9 +363,9 @@ fn draw_confirm_detach(f: &mut Frame, area: Rect, id: u64, app: &App) {
         .alignment(ratatui::layout::Alignment::Center),
         Line::from(""),
         Line::from({
-            let mut spans = action_chip("y", "detach", theme::ACCENT_GREEN);
+            let mut spans = action_chip(crate::keys::CONFIRM_YES.label, "detach", theme::ACCENT_GREEN);
             spans.push(Span::raw("   "));
-            spans.extend(action_chip("n", "cancel", theme::FG_DIM));
+            spans.extend(action_chip(crate::keys::CONFIRM_NO.label, "cancel", theme::FG_DIM));
             spans
         })
         .alignment(ratatui::layout::Alignment::Center),
@@ -551,10 +551,16 @@ fn draw_picker_popup(f: &mut Frame, area: Rect, state: &crate::app::PickerState)
         vertical[2],
     );
 
-    draw_dangerous_panel(f, vertical[3], state.dangerous);
+    draw_dangerous_panel(f, vertical[3], state.dangerous, crate::keys::PICKER_TOGGLE_DANGER.label);
     f.render_widget(
         Paragraph::new(Span::styled(
-            " ↑/↓ select  ·  type to filter  ·  Backspace clear  ·  Enter = resume  ·  Tab = toggle danger  ·  Esc cancel",
+            format!(
+                " ↑/↓ select  ·  type to filter  ·  {} clear  ·  {} resume  ·  {} toggle danger  ·  {} cancel",
+                crate::keys::PICKER_FILTER_CLEAR.label,
+                crate::keys::PICKER_PICK.label,
+                crate::keys::PICKER_TOGGLE_DANGER.label,
+                crate::keys::PICKER_CANCEL.label,
+            ),
             Style::default().fg(Color::DarkGray),
         )),
         vertical[4],
@@ -582,7 +588,11 @@ fn draw_rename_popup(f: &mut Frame, area: Rect, state: &crate::app::RenameState,
         Line::from(format!("  > {}_", state.buf)),
         Line::from(""),
         Line::from(Span::styled(
-            "  Enter = save  ·  Esc = cancel",
+            format!(
+                "  {} save  ·  {} cancel",
+                crate::keys::RENAME_SAVE.label,
+                crate::keys::RENAME_CANCEL.label,
+            ),
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1021,15 +1031,15 @@ fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
         );
     }
 
-    draw_dangerous_panel(f, layout[4], spawn.dangerous);
+    draw_dangerous_panel(f, layout[4], spawn.dangerous, crate::keys::SPAWN_TOGGLE_DANGER.label);
 
     let pairs = [
-        ("↑↓", "select"),
-        ("→", "descend"),
-        ("←", "ascend"),
-        ("Space", "danger"),
-        ("Enter", "pick"),
-        ("Esc", "cancel"),
+        (crate::keys::SPAWN_UP.label, "select"),
+        (crate::keys::SPAWN_DESCEND.label, "descend"),
+        (crate::keys::SPAWN_ASCEND.label, "ascend"),
+        (crate::keys::SPAWN_TOGGLE_DANGER.label, "danger"),
+        (crate::keys::SPAWN_PICK.label, "pick"),
+        (crate::keys::SPAWN_CANCEL.label, "cancel"),
     ];
     // pre-compute total content width to evenly distribute remaining space as gaps
     let content_width: usize = pairs
@@ -1057,7 +1067,7 @@ fn draw_spawn_popup(f: &mut Frame, area: Rect, spawn: &crate::app::SpawnState) {
     f.render_widget(Paragraph::new(Line::from(hint)), layout[6]);
 }
 
-fn draw_dangerous_panel(f: &mut Frame, area: Rect, active: bool) {
+fn draw_dangerous_panel(f: &mut Frame, area: Rect, active: bool, toggle_key: &'static str) {
     let (status_color, status_text, label_color, label_mod) = if active {
         (
             theme::ACCENT_RED,
@@ -1106,7 +1116,7 @@ fn draw_dangerous_panel(f: &mut Frame, area: Rect, active: bool) {
     .alignment(ratatui::layout::Alignment::Center);
     let key_line = {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.extend(kbd_chip("Space"));
+        spans.extend(kbd_chip(toggle_key));
         spans.push(Span::styled(
             " toggles ",
             Style::default().fg(theme::FG_DIM),
@@ -1143,10 +1153,17 @@ fn footer_for(app: &App) -> Line<'static> {
     let mode = &app.mode;
     let status = &app.status;
     let prefix_pending = app.prefix_pending;
+    use crate::keys;
     if prefix_pending {
         let mut spans = chip(" PREFIX ", theme::ACCENT_YELLOW);
         spans.push(Span::styled(
-            "  n=new · ↑↓=cycle · d=detach · l=load · ? more ".to_string(),
+            format!(
+                "  {}=new · ↑↓=cycle · {}=detach · {}=load · {} more ",
+                keys::PREFIX_SPAWN.label,
+                keys::PREFIX_DETACH.label,
+                keys::PREFIX_PICKER.label,
+                keys::PREFIX_HELP.label,
+            ),
             Style::default().fg(theme::FG),
         ));
         return Line::from(spans);
@@ -1154,9 +1171,17 @@ fn footer_for(app: &App) -> Line<'static> {
     if matches!(mode, Mode::Dashboard) {
         let mut spans = chip(" DASHBOARD ", theme::ACCENT_GREEN);
         spans.push(Span::raw("  "));
-        spans.extend(kbd_chip("Ctrl+A"));
+        spans.extend(kbd_chip(keys::PREFIX.label));
         spans.push(Span::styled(
-            "  then  n=new · l=load · ↑↓=cycle · 1-9=jump · r=rename · d=detach · z=sidebar · q=quit".to_string(),
+            format!(
+                "  then  {}=new · {}=load · ↑↓=cycle · 1-9=jump · {}=rename · {}=detach · {}=sidebar · {}=quit",
+                keys::PREFIX_SPAWN.label,
+                keys::PREFIX_PICKER.label,
+                keys::PREFIX_RENAME.label,
+                keys::PREFIX_DETACH.label,
+                keys::PREFIX_TOGGLE_SIDEBAR.label,
+                keys::PREFIX_QUIT.label,
+            ),
             Style::default().fg(theme::FG_MUTED),
         ));
         if !status.is_empty() {
@@ -1171,24 +1196,43 @@ fn footer_for(app: &App) -> Line<'static> {
         Mode::Dashboard => unreachable!(),
         Mode::Spawn(_) => (
             " SPAWN ",
-            "  Enter pick · Esc cancel · Space danger · ↑↓ select · →/← descend/ascend"
-                .to_string(),
+            format!(
+                "  {} pick · {} cancel · {} danger · {} select · {} / {} descend/ascend",
+                keys::SPAWN_PICK.label,
+                keys::SPAWN_CANCEL.label,
+                keys::SPAWN_TOGGLE_DANGER.label,
+                keys::SPAWN_UP.label,
+                keys::SPAWN_DESCEND.label,
+                keys::SPAWN_ASCEND.label,
+            ),
             theme::ACCENT_CYAN,
         ),
         Mode::Rename(_) => (
             " RENAME ",
-            "  type new name · Enter save · Esc cancel".to_string(),
+            format!(
+                "  type new name · {} save · {} cancel",
+                keys::RENAME_SAVE.label,
+                keys::RENAME_CANCEL.label,
+            ),
             theme::ACCENT_YELLOW,
         ),
         Mode::Picker(_) => (
             " RESUME ",
-            "  ↑↓ select · type to filter · Enter resume · Tab toggle danger · Esc cancel"
-                .to_string(),
+            format!(
+                "  ↑↓ select · type to filter · {} resume · {} toggle danger · {} cancel",
+                keys::PICKER_PICK.label,
+                keys::PICKER_TOGGLE_DANGER.label,
+                keys::PICKER_CANCEL.label,
+            ),
             theme::ACCENT_MAGENTA,
         ),
         Mode::ConfirmDetach(_) => (
             " CONFIRM ",
-            "  y detach · n/Esc cancel".to_string(),
+            format!(
+                "  {} detach · {} cancel",
+                keys::CONFIRM_YES.label,
+                keys::CONFIRM_NO.label,
+            ),
             theme::ACCENT_RED,
         ),
         Mode::Help => (
@@ -1198,7 +1242,11 @@ fn footer_for(app: &App) -> Line<'static> {
         ),
         Mode::Reorder => (
             " REORDER ",
-            "  ↑/↓ move focused session · Esc/Enter/q exit".to_string(),
+            format!(
+                "  {} move focused session · {} exit",
+                keys::REORDER_UP.label,
+                keys::REORDER_EXIT.label,
+            ),
             theme::ACCENT_MAGENTA,
         ),
         Mode::Scrollback(id) => {
@@ -1211,8 +1259,14 @@ fn footer_for(app: &App) -> Line<'static> {
             (
                 " SCROLLBACK ",
                 format!(
-                    "  offset={} · ↑/↓ line · PgUp/PgDn page · g top · G bottom · q/Esc exit",
-                    offset
+                    "  offset={} · {} line · {} / {} page · {} top · {} bottom · {} exit",
+                    offset,
+                    keys::SCROLLBACK_UP.label,
+                    keys::SCROLLBACK_PAGE_UP.label,
+                    keys::SCROLLBACK_PAGE_DOWN.label,
+                    keys::SCROLLBACK_TOP.label,
+                    keys::SCROLLBACK_BOTTOM.label,
+                    keys::SCROLLBACK_EXIT.label,
                 ),
                 theme::ACCENT_PEACH,
             )

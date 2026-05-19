@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
     MouseEventKind,
 };
 use crossterm::execute;
@@ -36,7 +36,7 @@ fn run_connect_mode(_args: &[String]) -> Result<()> {
     {
         use std::io::Write;
         let mut out = stdout();
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h");
         let _ = out.flush();
     }
     let backend = CrosstermBackend::new(stdout());
@@ -45,7 +45,7 @@ fn run_connect_mode(_args: &[String]) -> Result<()> {
     {
         use std::io::Write;
         let mut out = stdout();
-        let _ = out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        let _ = out.write_all(b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l");
     }
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
@@ -134,6 +134,10 @@ fn drive_main_loop(
                 }
                 Event::Mouse(me) => {
                     handle_mouse(&mut app, me);
+                }
+                Event::Paste(text) => {
+                    handle_paste(&mut app, &text);
+                    app.needs_redraw = true;
                 }
                 _ => {}
             }
@@ -279,7 +283,7 @@ fn main() -> Result<()> {
     {
         use std::io::Write;
         let mut out = stdout();
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h");
         let _ = out.flush();
     }
     let backend = CrosstermBackend::new(stdout());
@@ -290,7 +294,7 @@ fn main() -> Result<()> {
     {
         use std::io::Write;
         let mut out = stdout();
-        let _ = out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        let _ = out.write_all(b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l");
         let _ = out.flush();
     }
     disable_raw_mode()?;
@@ -379,6 +383,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
                 }
                 Event::Mouse(me) => {
                     handle_mouse(&mut app, me);
+                }
+                Event::Paste(text) => {
+                    handle_paste(&mut app, &text);
+                    app.needs_redraw = true;
                 }
                 _ => {}
             }
@@ -523,6 +531,27 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
     }
 }
 
+fn handle_paste(app: &mut App, text: &str) {
+    use alacritty_terminal::term::TermMode;
+    let Some(s) = app.sessions.get_mut(app.focus) else { return };
+    let bracketed = s
+        .parser
+        .lock()
+        .ok()
+        .map(|p| p.term.mode().contains(TermMode::BRACKETED_PASTE))
+        .unwrap_or(false);
+    if bracketed {
+        let mut buf: Vec<u8> = Vec::with_capacity(text.len() + 12);
+        buf.extend_from_slice(b"\x1b[200~");
+        buf.extend_from_slice(text.as_bytes());
+        buf.extend_from_slice(b"\x1b[201~");
+        let _ = s.write(&buf);
+    } else {
+        let cleaned: String = text.chars().filter(|&c| c != '\u{1b}').collect();
+        let _ = s.write(cleaned.as_bytes());
+    }
+}
+
 fn emit_osc52(text: &str) {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
@@ -592,13 +621,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         app.should_quit = true;
         return Ok(());
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
+    if keys::HARD_QUIT.matches(&key) {
         app.should_quit = true;
         return Ok(());
     }
 
-    let is_prefix_key = (key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')))
+    let is_prefix_key = keys::PREFIX.matches(&key)
         || matches!(key.code, KeyCode::Char('\u{01}'));
 
     if app.prefix_pending {
@@ -628,23 +656,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_reorder(app: &mut App, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            move_focused(app, -1);
-            app.persist_dirty = true;
-            app.mode = Mode::Reorder;
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            move_focused(app, 1);
-            app.persist_dirty = true;
-            app.mode = Mode::Reorder;
-        }
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-            app.mode = Mode::Dashboard;
-        }
-        _ => {
-            app.mode = Mode::Reorder;
-        }
+    if keys::REORDER_UP.matches(&key) {
+        move_focused(app, -1);
+        app.persist_dirty = true;
+        app.mode = Mode::Reorder;
+    } else if keys::REORDER_DOWN.matches(&key) {
+        move_focused(app, 1);
+        app.persist_dirty = true;
+        app.mode = Mode::Reorder;
+    } else if keys::REORDER_EXIT.matches(&key) {
+        app.mode = Mode::Dashboard;
+    } else {
+        app.mode = Mode::Reorder;
     }
     Ok(())
 }
@@ -656,25 +679,28 @@ fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
         return Ok(());
     };
 
-    let exit = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
-    if exit {
+    if keys::SCROLLBACK_EXIT.matches(&key) {
         s.scrollback = None;
         s.selection = None;
         app.mode = Mode::Dashboard;
         return Ok(());
     }
 
-    let scroll = match key.code {
-        KeyCode::Up | KeyCode::Char('k') => Scroll::Delta(1),
-        KeyCode::Down | KeyCode::Char('j') => Scroll::Delta(-1),
-        KeyCode::PageUp | KeyCode::Char('b') => Scroll::PageUp,
-        KeyCode::PageDown | KeyCode::Char('f') | KeyCode::Char(' ') => Scroll::PageDown,
-        KeyCode::Home | KeyCode::Char('g') => Scroll::Top,
-        KeyCode::End | KeyCode::Char('G') => Scroll::Bottom,
-        _ => {
-            app.mode = Mode::Scrollback(id);
-            return Ok(());
-        }
+    let scroll = if keys::SCROLLBACK_UP.matches(&key) {
+        Scroll::Delta(1)
+    } else if keys::SCROLLBACK_DOWN.matches(&key) {
+        Scroll::Delta(-1)
+    } else if keys::SCROLLBACK_PAGE_UP.matches(&key) {
+        Scroll::PageUp
+    } else if keys::SCROLLBACK_PAGE_DOWN.matches(&key) {
+        Scroll::PageDown
+    } else if keys::SCROLLBACK_TOP.matches(&key) {
+        Scroll::Top
+    } else if keys::SCROLLBACK_BOTTOM.matches(&key) {
+        Scroll::Bottom
+    } else {
+        app.mode = Mode::Scrollback(id);
+        return Ok(());
     };
 
     if let Some(sb) = s.scrollback.as_mut() {
@@ -685,104 +711,88 @@ fn handle_scrollback(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_confirm_detach(app: &mut App, id: u64, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            if let Some(idx) = app.sessions.iter().position(|s| s.id == id) {
-                app.focus = idx;
-                app.detach_focused();
-                app.persist_dirty = true;
-            }
-            app.mode = Mode::Dashboard;
+    if keys::CONFIRM_YES.matches(&key) {
+        if let Some(idx) = app.sessions.iter().position(|s| s.id == id) {
+            app.focus = idx;
+            app.detach_focused();
+            app.persist_dirty = true;
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.mode = Mode::Dashboard;
-        }
-        _ => {
-            app.mode = Mode::ConfirmDetach(id);
-        }
+        app.mode = Mode::Dashboard;
+    } else if keys::CONFIRM_NO.matches(&key) {
+        app.mode = Mode::Dashboard;
+    } else {
+        app.mode = Mode::ConfirmDetach(id);
     }
     Ok(())
 }
 
 fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
     let mode_before = format!("{:?}", std::mem::discriminant(&app.mode));
-    if matches!(key.code, KeyCode::Down) {
+
+    if keys::PREFIX_FOCUS_NEXT.matches(&key) {
         app.cycle_focus(1);
         return Ok(());
     }
-    if matches!(key.code, KeyCode::Up) {
+    if keys::PREFIX_FOCUS_PREV.matches(&key) {
         app.cycle_focus(-1);
         return Ok(());
     }
-    let ch = match key.code {
-        KeyCode::Char(c) => c.to_ascii_lowercase(),
-        _ => return Ok(()),
-    };
-    match ch {
-        'q' => app.should_quit = true,
-        'n' => {
-            app.mode = Mode::Spawn(SpawnState::new(app.default_cwd.clone()));
+    if keys::PREFIX_QUIT.matches(&key) {
+        app.should_quit = true;
+    } else if keys::PREFIX_SPAWN.matches(&key) {
+        app.mode = Mode::Spawn(SpawnState::new(app.default_cwd.clone()));
+    } else if keys::PREFIX_DETACH.matches(&key) {
+        if let Some(s) = app.sessions.get(app.focus) {
+            app.mode = Mode::ConfirmDetach(s.id);
         }
-        'd' => {
-            if let Some(s) = app.sessions.get(app.focus) {
-                app.mode = Mode::ConfirmDetach(s.id);
-            }
+    } else if keys::PREFIX_TOGGLE_SIDEBAR.matches(&key) {
+        app.show_sidebar = !app.show_sidebar;
+        resize_all(app);
+        app.persist_dirty = true;
+    } else if keys::PREFIX_RENAME.matches(&key) {
+        if let Some(s) = app.sessions.get(app.focus) {
+            app.mode = Mode::Rename(RenameState {
+                session_id: s.id,
+                buf: s.label.clone(),
+            });
         }
-        'z' => {
-            app.show_sidebar = !app.show_sidebar;
+    } else if keys::PREFIX_PICKER.matches(&key) {
+        app.mode = Mode::Picker(PickerState::new());
+    } else if keys::PREFIX_SEND_CTRL_A.matches(&key) {
+        if let Some(s) = app.sessions.get_mut(app.focus) {
+            let _ = s.write(&[0x01]);
+        }
+    } else if keys::PREFIX_SCROLLBACK.matches(&key) {
+        if let Some(s) = app.sessions.get_mut(app.focus) {
+            let id = s.id;
+            let (rows, cols) = s.size;
+            let bytes: Vec<u8> = s
+                .byte_ring
+                .lock()
+                .map(|r| r.iter().copied().collect())
+                .unwrap_or_default();
+            s.scrollback = Some(session::build_scrollback(rows, cols, &bytes));
+            app.mode = Mode::Scrollback(id);
+        }
+    } else if keys::PREFIX_HELP.matches(&key) {
+        app.mode = Mode::Help;
+    } else if keys::PREFIX_REORDER.matches(&key) && !app.sessions.is_empty() {
+        app.mode = Mode::Reorder;
+    } else if let KeyCode::Char(c) = key.code
+        && c.is_ascii_digit()
+    {
+        let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
+        if idx < app.sessions.len() {
+            app.focus = idx;
             resize_all(app);
-            app.persist_dirty = true;
         }
-        'r' => {
-            if let Some(s) = app.sessions.get(app.focus) {
-                app.mode = Mode::Rename(RenameState {
-                    session_id: s.id,
-                    buf: s.label.clone(),
-                });
-            }
-        }
-        'l' => {
-            app.mode = Mode::Picker(PickerState::new());
-        }
-        'a' => {
-            if let Some(s) = app.sessions.get_mut(app.focus) {
-                let _ = s.write(&[0x01]);
-            }
-        }
-        '[' => {
-            if let Some(s) = app.sessions.get_mut(app.focus) {
-                let id = s.id;
-                let (rows, cols) = s.size;
-                let bytes: Vec<u8> = s
-                    .byte_ring
-                    .lock()
-                    .map(|r| r.iter().copied().collect())
-                    .unwrap_or_default();
-                s.scrollback = Some(session::build_scrollback(rows, cols, &bytes));
-                app.mode = Mode::Scrollback(id);
-            }
-        }
-        '?' => {
-            app.mode = Mode::Help;
-        }
-        'm' if !app.sessions.is_empty() => {
-            app.mode = Mode::Reorder;
-        }
-        c if c.is_ascii_digit() => {
-            let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
-            if idx < app.sessions.len() {
-                app.focus = idx;
-                resize_all(app);
-            }
-        }
-        _ => {}
     }
     if util::debug_enabled() {
         let mode_after = format!("{:?}", std::mem::discriminant(&app.mode));
         debug_log!(
             "/tmp/cmux-keys.log",
-            "  CHORD {} mode_before={} mode_after={} sessions={} focus={}",
-            ch,
+            "  CHORD {:?} mode_before={} mode_after={} sessions={} focus={}",
+            key.code,
             mode_before,
             mode_after,
             app.sessions.len(),
@@ -802,165 +812,142 @@ fn handle_dashboard(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => {
+    if keys::PICKER_CANCEL.matches(&key) {
+        app.mode = Mode::Dashboard;
+    } else if keys::PICKER_UP.matches(&key) {
+        state.move_sel(-1);
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_DOWN.matches(&key) {
+        state.move_sel(1);
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_PGUP.matches(&key) {
+        state.move_sel(-10);
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_PGDOWN.matches(&key) {
+        state.move_sel(10);
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_HOME.matches(&key) {
+        state.selected = 0;
+        state.ensure_preview();
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_END.matches(&key) {
+        state.selected = state.items.len().saturating_sub(1);
+        state.ensure_preview();
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_TOGGLE_DANGER.matches(&key) {
+        state.dangerous = !state.dangerous;
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_FILTER_CLEAR.matches(&key) {
+        state.filter.pop();
+        state.apply_filter();
+        app.mode = Mode::Picker(state);
+    } else if keys::PICKER_PICK.matches(&key) {
+        let chosen = state.current().map(|t| (t.cwd.clone(), t.session_id.clone()));
+        let dangerous = state.dangerous;
+        if let Some((cwd, session_id)) = chosen {
             app.mode = Mode::Dashboard;
-        }
-        KeyCode::Up => {
-            state.move_sel(-1);
-            app.mode = Mode::Picker(state);
-        }
-        KeyCode::Down => {
-            state.move_sel(1);
-            app.mode = Mode::Picker(state);
-        }
-        KeyCode::PageUp => { state.move_sel(-10); app.mode = Mode::Picker(state); }
-        KeyCode::PageDown => { state.move_sel(10); app.mode = Mode::Picker(state); }
-        KeyCode::Home => { state.selected = 0; state.ensure_preview(); app.mode = Mode::Picker(state); }
-        KeyCode::End => {
-            state.selected = state.items.len().saturating_sub(1);
-            state.ensure_preview();
-            app.mode = Mode::Picker(state);
-        }
-        KeyCode::Tab => {
-            state.dangerous = !state.dangerous;
-            app.mode = Mode::Picker(state);
-        }
-        KeyCode::Backspace => {
-            state.filter.pop();
-            state.apply_filter();
-            app.mode = Mode::Picker(state);
-        }
-        KeyCode::Enter => {
-            let chosen = state.current().map(|t| (t.cwd.clone(), t.session_id.clone()));
-            let dangerous = state.dangerous;
-            if let Some((cwd, session_id)) = chosen {
-                app.mode = Mode::Dashboard;
-                match app.spawn_resume(cwd, dangerous, session_id) {
-                    Ok(()) => {
-                        app.status = format!(
-                            "resumed session [{}]  ·  {}",
-                            app.sessions.len(),
-                            util::PREFIX_HINT
-                        );
-                        resize_all(app);
-                        app.persist_dirty = true;
-                    }
-                    Err(e) => {
-                        app.status = format!("resume failed: {}", e);
-                    }
-                }
-            } else {
-                app.mode = Mode::Dashboard;
-            }
-        }
-        KeyCode::Char(c) => {
-            state.filter.push(c);
-            state.apply_filter();
-            app.mode = Mode::Picker(state);
-        }
-        _ => {
-            app.mode = Mode::Picker(state);
-        }
-    }
-    Ok(())
-}
-
-fn handle_rename(app: &mut App, mut state: RenameState, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => {
-            app.mode = Mode::Dashboard;
-        }
-        KeyCode::Enter => {
-            let new_label = state.buf.trim().to_string();
-            if !new_label.is_empty()
-                && let Some(s) = app.sessions.iter_mut().find(|s| s.id == state.session_id)
-            {
-                s.label = new_label;
-                s.manually_renamed = true;
-            }
-            app.mode = Mode::Dashboard;
-            app.persist_dirty = true;
-        }
-        KeyCode::Backspace => {
-            state.buf.pop();
-            app.mode = Mode::Rename(state);
-        }
-        KeyCode::Char(c) => {
-            state.buf.push(c);
-            app.mode = Mode::Rename(state);
-        }
-        _ => {
-            app.mode = Mode::Rename(state);
-        }
-    }
-    Ok(())
-}
-
-fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => {
-            app.mode = Mode::Dashboard;
-        }
-        KeyCode::Enter => {
-            let chosen = state.pick();
-            let dangerous = state.dangerous;
-            app.mode = Mode::Dashboard;
-            match app.spawn_session(chosen, dangerous) {
+            match app.spawn_resume(cwd, dangerous, session_id) {
                 Ok(()) => {
                     app.status = format!(
-                        "spawned session [{}]  ·  {}",
+                        "resumed session [{}]  ·  {}",
                         app.sessions.len(),
-                        util::PREFIX_HINT
+                        util::prefix_hint()
                     );
                     resize_all(app);
                     app.persist_dirty = true;
                 }
                 Err(e) => {
-                    app.status = format!("spawn failed: {}", e);
+                    app.status = format!("resume failed: {}", e);
                 }
             }
-            return Ok(());
+        } else {
+            app.mode = Mode::Dashboard;
         }
-        KeyCode::Char(' ') => {
-            state.dangerous = !state.dangerous;
-            app.mode = Mode::Spawn(state);
+    } else if let KeyCode::Char(c) = key.code {
+        state.filter.push(c);
+        state.apply_filter();
+        app.mode = Mode::Picker(state);
+    } else {
+        app.mode = Mode::Picker(state);
+    }
+    Ok(())
+}
+
+fn handle_rename(app: &mut App, mut state: RenameState, key: KeyEvent) -> Result<()> {
+    if keys::RENAME_CANCEL.matches(&key) {
+        app.mode = Mode::Dashboard;
+    } else if keys::RENAME_SAVE.matches(&key) {
+        let new_label = state.buf.trim().to_string();
+        if !new_label.is_empty()
+            && let Some(s) = app.sessions.iter_mut().find(|s| s.id == state.session_id)
+        {
+            s.label = new_label;
+            s.manually_renamed = true;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.move_sel(-1);
-            app.mode = Mode::Spawn(state);
+        app.mode = Mode::Dashboard;
+        app.persist_dirty = true;
+    } else if matches!(key.code, KeyCode::Backspace) {
+        state.buf.pop();
+        app.mode = Mode::Rename(state);
+    } else if let KeyCode::Char(c) = key.code {
+        state.buf.push(c);
+        app.mode = Mode::Rename(state);
+    } else {
+        app.mode = Mode::Rename(state);
+    }
+    Ok(())
+}
+
+fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<()> {
+    if keys::SPAWN_CANCEL.matches(&key) {
+        app.mode = Mode::Dashboard;
+    } else if keys::SPAWN_PICK.matches(&key) {
+        let chosen = state.pick();
+        let dangerous = state.dangerous;
+        app.mode = Mode::Dashboard;
+        match app.spawn_session(chosen, dangerous) {
+            Ok(()) => {
+                app.status = format!(
+                    "spawned session [{}]  ·  {}",
+                    app.sessions.len(),
+                    util::prefix_hint()
+                );
+                resize_all(app);
+                app.persist_dirty = true;
+            }
+            Err(e) => {
+                app.status = format!("spawn failed: {}", e);
+            }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.move_sel(1);
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::PageUp => {
-            state.move_sel(-10);
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::PageDown => {
-            state.move_sel(10);
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::Home => {
-            state.selected = 0;
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::End => {
-            state.selected = state.entries.len().saturating_sub(1);
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            state.descend();
-            app.mode = Mode::Spawn(state);
-        }
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
-            state.ascend();
-            app.mode = Mode::Spawn(state);
-        }
-        _ => {
-            app.mode = Mode::Spawn(state);
-        }
+    } else if keys::SPAWN_TOGGLE_DANGER.matches(&key) {
+        state.dangerous = !state.dangerous;
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_UP.matches(&key) {
+        state.move_sel(-1);
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_DOWN.matches(&key) {
+        state.move_sel(1);
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_PGUP.matches(&key) {
+        state.move_sel(-10);
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_PGDOWN.matches(&key) {
+        state.move_sel(10);
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_HOME.matches(&key) {
+        state.selected = 0;
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_END.matches(&key) {
+        state.selected = state.entries.len().saturating_sub(1);
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_DESCEND.matches(&key) {
+        state.descend();
+        app.mode = Mode::Spawn(state);
+    } else if keys::SPAWN_ASCEND.matches(&key) {
+        state.ascend();
+        app.mode = Mode::Spawn(state);
+    } else {
+        app.mode = Mode::Spawn(state);
     }
     Ok(())
 }
