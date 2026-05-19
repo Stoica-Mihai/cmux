@@ -202,7 +202,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
                 let one: Vec<u8> = match mode {
                     Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
                         let btn = if up { 64 } else { 65 };
-                        format!("\x1b[<{};{};{};M", btn, col, row).into_bytes()
+                        format!("\x1b[<{};{};{}M", btn, col, row).into_bytes()
                     }
                     Some(m)
                         if m.intersects(
