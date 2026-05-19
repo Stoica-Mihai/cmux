@@ -152,15 +152,6 @@ fn apply_scroll_lines(app: &mut App, delta: i32) {
 }
 
 fn handle_mouse(app: &mut App, me: MouseEvent) {
-    debug_log!(
-        "/tmp/cmux-wheel.log",
-        "mouse kind={:?} col={} row={} mods={:?} tile={:?}",
-        me.kind,
-        me.column,
-        me.row,
-        me.modifiers,
-        app.last_tile_area
-    );
     let Some(tile) = app.last_tile_area else { return };
     let inside = me.column >= tile.x
         && me.column < tile.x + tile.width
@@ -199,37 +190,44 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
             }
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
+            use alacritty_terminal::term::TermMode;
             let up = matches!(me.kind, MouseEventKind::ScrollUp);
-            debug_log!(
-                "/tmp/cmux-wheel.log",
-                "wheel up={} mode={:?} ts={}",
-                up,
-                std::mem::discriminant(&app.mode),
-                util::now_ms()
-            );
             if matches!(app.mode, Mode::Scrollback(_)) {
-                apply_scroll_lines(app, if up { 3 } else { -3 });
+                apply_scroll_lines(app, if up { 1 } else { -1 });
             } else if let Some(s) = app.sessions.get_mut(app.focus) {
-                let mouse_mode = s
-                    .parser
-                    .lock()
-                    .ok()
-                    .map(|p| format!("{:?}", p.term.mode()))
-                    .unwrap_or_default();
-                const WHEEL_LINES: usize = 5;
-                let seq: &[u8] = if up { b"\x1b[5~" } else { b"\x1b[6~" };
-                let mut buf: Vec<u8> = Vec::with_capacity(seq.len() * WHEEL_LINES);
-                for _ in 0..WHEEL_LINES {
-                    buf.extend_from_slice(seq);
-                }
-                let res = s.write(&buf);
-                debug_log!(
-                    "/tmp/cmux-wheel.log",
-                    "  send pty bytes={} write_ok={} term_mode={}",
-                    buf.len(),
-                    res.is_ok(),
-                    mouse_mode
-                );
+                let mode = s.parser.lock().ok().map(|p| *p.term.mode());
+                let col = me.column.saturating_sub(tile.x) + 1;
+                let row = me.row.saturating_sub(tile.y) + 1;
+                let bytes: Vec<u8> = match mode {
+                    Some(m) if m.intersects(TermMode::SGR_MOUSE) => {
+                        let btn = if up { 64 } else { 65 };
+                        format!("\x1b[<{};{};{};M", btn, col, row).into_bytes()
+                    }
+                    Some(m)
+                        if m.intersects(
+                            TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION,
+                        ) =>
+                    {
+                        // X10/normal mouse: ESC [ M Cb Cx Cy (1-byte each, +32 offset)
+                        let btn = if up { 64u8 } else { 65u8 };
+                        vec![
+                            0x1b,
+                            b'[',
+                            b'M',
+                            btn + 32,
+                            (col as u8).saturating_add(32),
+                            (row as u8).saturating_add(32),
+                        ]
+                    }
+                    Some(m) if m.intersects(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) => {
+                        // arrow up/down — what alt-screen apps usually bind
+                        if up { b"\x1b[A".to_vec() } else { b"\x1b[B".to_vec() }
+                    }
+                    _ => {
+                        if up { b"\x1b[5~".to_vec() } else { b"\x1b[6~".to_vec() }
+                    }
+                };
+                let _ = s.write(&bytes);
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
