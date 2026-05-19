@@ -99,7 +99,7 @@ fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
     ];
     if app.daemon.is_some() {
         left_spans.push(Span::raw(" "));
-        left_spans.extend(chip(" ⚡ cmuxd ", theme::ACCENT_GREEN));
+        left_spans.extend(chip(" cmuxd ", theme::ACCENT_GREEN));
     } else {
         left_spans.push(Span::raw(" "));
         left_spans.push(Span::styled(
