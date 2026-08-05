@@ -34,3 +34,6 @@ flamegraph.svg
 # Backup files
 *.bak
 *.orig
+
+# Claude Code local config
+.claude/
