@@ -11,8 +11,10 @@ Pure Rust. No tmux required.
 
 Two backends:
 
-- **Local (default)** — `cmux` owns each `claude` PTY itself. When `cmux` exits, sessions die. The session list (cwd, label, dangerous flag, resume id, sidebar state) is persisted to `$XDG_CONFIG_HOME/cmux/state.json`; on next launch each saved entry is respawned with `claude --resume <id>` so the conversation reattaches at the application layer.
-- **Daemon (`cmux --connect`)** — a long-lived `cmuxd` process owns the PTYs. `cmux` becomes a thin client: it renders, forwards keys/mouse/resize, and copies on selection. Close `cmux` and the `claude` processes stay running inside `cmuxd`. Reopen `cmux --connect` and every session reattaches with its live scrollback intact. Title bar shows a green `cmuxd` chip whenever you're in this mode.
+- **Daemon (default)** — a long-lived `cmuxd` process owns the PTYs, auto-started if none is running. `cmux` is a thin client: it renders, forwards keys/mouse/resize, and copies on selection. Quit `cmux` and the sessions keep running; open it again and each one reattaches with its live scrollback. A second terminal, or a browser via `--http`, attaches to those same sessions and can read and write them too. Title bar shows a green `cmuxd` chip.
+- **Local (`cmux --local`)** — `cmux` owns each PTY itself. Sessions die when it exits and nothing else can see them. Useful when you don't want a background process.
+
+Either way the session list (cwd, label, dangerous flag, resume id, sidebar state) is persisted to `$XDG_CONFIG_HOME/cmux/state.json`, and each saved entry is respawned on next launch with `claude --resume <id>` so the conversation reattaches at the application layer. In daemon mode that replay happens only when the daemon is holding no sessions — a daemon that already has them is the source of truth.
 
 ## Repo layout (Cargo workspace)
 
@@ -39,8 +41,8 @@ Builds in release, then installs `cmux` and `cmuxd` into `$CARGO_HOME/bin`
 (usually `~/.cargo/bin`) — make sure that directory is on your `PATH`.
 `make uninstall` removes them again.
 
-Both binaries matter: `cmux --connect` auto-spawns `cmuxd`, looking next to its
-own executable first and then on `PATH`.
+Both binaries matter: `cmux` is daemon-backed by default and auto-spawns
+`cmuxd`, looking next to its own executable first and then on `PATH`.
 
 Note that `cargo install --path .` does **not** work from the workspace root —
 that manifest is virtual, with no package of its own — so each binary crate is
@@ -69,7 +71,7 @@ cargo install --path crates/cmuxd --locked
 ```
 cargo build --release --workspace
 
-target/release/cmux              # TUI (local mode)
+target/release/cmux              # TUI (daemon-backed)
 target/release/cmuxd             # daemon
 ```
 
@@ -78,26 +80,32 @@ Or without building first:
 ```
 cargo run -p cmux                # TUI
 cargo run -p cmuxd               # daemon
-cargo run -p cmux -- --connect   # TUI in daemon-backed mode
+cargo run -p cmux -- --local     # TUI owning its own PTYs
 cargo run -p cmux -- ctl list    # admin CLI
 ```
 
 ## Daemon mode
 
-Persistent sessions across `cmux` exits.
+The default. Sessions persist across `cmux` exits, and more than one client can
+attach to them at once.
 
 ```
-cmux --connect
+cmux                 # daemon-backed
+cmux --http          # …and serve the browser API too
+cmux --local         # opt out: PTYs owned by this process, nothing else sees them
 ```
 
-That's it — if no `cmuxd` is running, `cmux --connect` auto-spawns one in the background (binary next to `cmux`, then `$PATH`) and waits up to 2 s for its socket. To run the daemon manually, just `cmuxd` in a separate terminal.
+If no `cmuxd` is running, `cmux` auto-spawns one in the background (binary next
+to `cmux`, then `$PATH`) and waits up to 2 s for its socket. To run the daemon
+manually, just `cmuxd` in a separate terminal. `--connect` is still accepted,
+since it used to be required.
 
 `cmux` connects to `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` (fallback `/tmp/cmux-<uid>/cmux/`), lists existing sessions, and hydrates the sidebar. New sessions you spawn (`Ctrl+A n`) go through the daemon. Quitting `cmux` (`Ctrl+Q`) sends `Detach { keep_session: true }` for every session — `cmuxd` keeps them alive.
 
 ### Visual cues
 
 - Title bar shows a green `cmuxd` chip whenever the TUI is daemon-backed; dim `local` text otherwise.
-- If `cmuxd` dies mid-session, the TUI dims, shows a centered "Daemon disconnected" modal, and exits on any keypress. Sessions remain on disk for the next `cmux --connect`.
+- If `cmuxd` dies mid-session, the TUI dims, shows a centered "Daemon disconnected" modal, and exits on any keypress. Sessions remain on disk for the next `cmux`.
 
 ### `cmux ctl` admin commands
 
@@ -147,7 +155,7 @@ cmuxd http api on http://127.0.0.1:7070
 
 ### The terminal and the browser mirror each other
 
-They are not two views of two things. `cmux --connect` and a browser tab attach
+They are not two views of two things. `cmux` and a browser tab attach
 to the *same* PTYs in the same daemon, and both read and write: type in the
 terminal and it appears in the browser, type in the browser and it appears in
 the terminal. Leave your desk mid-session, open the page on a phone, keep going.
@@ -156,14 +164,14 @@ If you want the browser available without planning ahead, have `cmux` start the
 daemon with the API already on:
 
 ```sh
-cmux --connect --http               # 127.0.0.1:7070
-cmux --connect --http 127.0.0.1:9000
+cmux --http                         # 127.0.0.1:7070
+cmux --http 127.0.0.1:9000
 ```
 
 That flag only applies when this command is the one that starts the daemon. A
 daemon already running keeps whatever it was launched with, so for an
 always-available API start `cmuxd --http` from your shell profile or a systemd
-user unit and let `cmux --connect` find it.
+user unit and let `cmux` find it.
 
 **Grid size with more than one client attached.** Each client reports its own
 size and the PTY runs at the smallest, exactly as tmux does. A phone at 24x80
@@ -384,12 +392,12 @@ Delete the file to start clean.
 - Sessions whose child exits are reaped on the next event-loop tick.
 - Resume uses `claude --resume <session_id>`; the id is extracted from the transcript path under `~/.claude/projects/<slugified-cwd>/<id>.jsonl`.
 
-### Daemon mode (`--connect`)
+### Daemon mode (the default)
 - `cmuxd` owns every PTY, parser, and alacritty `Term` instance. Runs on a `tokio` multi-thread runtime.
 - The daemon knows nothing about `claude`. `Request::SpawnSession` carries the argv to exec plus the client's grid size, and a `ProbeKind` selecting how status is derived. `ProbeKind::Claude` installs the probe in `crates/cmuxd/src/probe.rs`; `ProbeKind::None` runs no probe and starts no polling task. Adding support for another program means adding a `StatusProbe` impl, not touching the session plumbing.
 - Communication over a UNIX socket at `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` with file mode `0o600`. Per-message framing is `u32_le length || serde_json payload`.
 - Per session inside the daemon: blocking PTY reader → fans bytes into `tokio::sync::broadcast::Sender<Vec<u8>>` so every attached client gets the same byte stream as a `FrameDelta` event.
-- `cmux --connect` runs the same TUI / renderer / mouse selection / OSC 52 path as local mode. The only difference is per-Session backend: `Session::Backend::Daemon` routes `write()` / `resize()` / `kill()` / `detach_keep()` to `Request::Input` / `Request::Resize` / `Request::Detach`.
+- `cmux` runs the same TUI / renderer / mouse selection / OSC 52 path as local mode. The only difference is per-Session backend: `Session::Backend::Daemon` routes `write()` / `resize()` / `kill()` / `detach_keep()` to `Request::Input` / `Request::Resize` / `Request::Detach`.
 - A connection-side reader thread distributes `FrameDelta` events into per-session `DaemonSlot` Arcs (parser + ring + dirty + alive). UI code reads these unchanged from local mode.
 
 ## Dependencies

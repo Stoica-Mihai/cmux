@@ -67,8 +67,19 @@ fn run_with_daemon(
     let (term_rows, term_cols) = app.term_size;
     let main_cols = term_cols.saturating_sub(32).saturating_sub(2).max(10);
     let main_rows = term_rows.saturating_sub(3).max(4);
+    let adopted = !infos.is_empty();
     for info in infos {
         let _ = app.adopt_daemon_session(info, &handle, main_rows, main_cols);
+    }
+
+    // A daemon that is holding sessions already is the source of truth. Only
+    // when it has none is this a cold start, and the saved sessions are
+    // replayed — into the daemon, so they outlive this process and show up in
+    // the browser like everything else.
+    let saved = persist::load();
+    app.show_sidebar = saved.show_sidebar;
+    if !adopted {
+        restore_saved(&mut app, saved.sessions);
     }
 
     // Same loop as local mode; teardown branches on app.daemon to detach
@@ -189,10 +200,15 @@ fn dispatch_event(app: &mut App, ev: Event, debug: bool) -> Result<()> {
     about = "tmux-style TUI for managing multiple `claude` CLI sessions"
 )]
 struct Cli {
-    /// Connect to a running cmuxd daemon instead of owning local PTYs. The
-    /// daemon is auto-spawned if no socket is present.
+    /// Now the default; accepted so existing invocations keep working.
     #[arg(long)]
     connect: bool,
+
+    /// Own the PTYs in this process instead of handing them to cmuxd. Sessions
+    /// then die when you quit, and nothing else — no second terminal, no
+    /// browser — can see them.
+    #[arg(long)]
+    local: bool,
 
     /// Start the daemon's HTTP + WebSocket API too, so the same sessions can
     /// be picked up in a browser. Only applies when this command is the one
@@ -351,7 +367,12 @@ fn main() -> Result<()> {
     if let Some(Command::Ctl { cmd }) = cli.command {
         return run_ctl(cmd);
     }
-    if cli.connect {
+    if cli.connect && cli.local {
+        anyhow::bail!("--connect and --local are opposites; pass one or neither");
+    }
+    // Daemon-backed unless asked otherwise: sessions outlive the TUI, and a
+    // browser or a second terminal can attach to the same ones.
+    if !cli.local {
         return run_connect_mode(cli.http.as_deref());
     }
 
@@ -385,14 +406,10 @@ fn main() -> Result<()> {
     res
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
-    let size = terminal.size()?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut app = App::new(cwd, (size.height, size.width));
-
-    let saved = persist::load();
-    app.show_sidebar = saved.show_sidebar;
-    for ps in saved.sessions {
+/// Respawn saved sessions. `App::spawn_*` route through the daemon whenever
+/// one is attached, so this serves both modes.
+fn restore_saved(app: &mut App, saved: Vec<persist::PersistedSession>) {
+    for ps in saved {
         let res = if let Some(id) = ps.resume_id.clone() {
             app.spawn_resume(ps.cwd.clone(), ps.dangerous, id)
         } else {
@@ -402,11 +419,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()>
             && let Some(s) = app.sessions.last_mut()
         {
             if !ps.label.is_empty() {
-                s.label = ps.label;
+                s.set_label(ps.label);
             }
             s.manually_renamed = ps.manually_renamed;
         }
     }
+}
+
+fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+    let size = terminal.size()?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut app = App::new(cwd, (size.height, size.width));
+
+    let saved = persist::load();
+    app.show_sidebar = saved.show_sidebar;
+    restore_saved(&mut app, saved.sessions);
     flush_persist(&app);
 
     event_loop(terminal, app)
@@ -886,7 +913,7 @@ fn handle_rename(app: &mut App, mut state: RenameState, key: KeyEvent) -> Result
         if !new_label.is_empty()
             && let Some(s) = app.sessions.iter_mut().find(|s| s.id == state.session_id)
         {
-            s.label = new_label;
+            s.set_label(new_label);
             s.manually_renamed = true;
         }
         app.mode = Mode::Dashboard;

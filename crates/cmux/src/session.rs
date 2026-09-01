@@ -375,6 +375,19 @@ impl Session {
         matches!(self.backend, Backend::Daemon { .. })
     }
 
+    /// Set the label, telling the daemon too when it owns the pty. Writing
+    /// `self.label` alone leaves the terminal and the browser disagreeing
+    /// about the session's name.
+    pub fn set_label(&mut self, label: String) {
+        self.label = label.clone();
+        if let Backend::Daemon { remote_id, req_tx } = &self.backend {
+            let _ = req_tx.send(ProtoRequest::Rename {
+                session_id: *remote_id,
+                label,
+            });
+        }
+    }
+
     pub fn poll_status(&mut self) {
         let now = now_ms();
         if now.saturating_sub(self.last_status_check_ms) < 500 {
