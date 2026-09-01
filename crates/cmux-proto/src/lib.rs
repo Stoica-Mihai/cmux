@@ -1,6 +1,11 @@
 //! Wire types and framing for the cmux ↔ cmuxd protocol.
 //!
 //! See `DAEMON_PLAN.md` §6 for protocol semantics.
+//!
+//! The daemon hosts an arbitrary command per session. Anything claude-specific
+//! travels in [`ProbeKind`], which tells the daemon how to derive status for
+//! that session — the daemon itself only ever execs [`Request::SpawnSession`]'s
+//! `cmd`.
 
 #![deny(unsafe_code)]
 
@@ -9,11 +14,13 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Bumped to 2 when `SpawnSession` became command-generic. A v1 client is
+/// rejected at the handshake rather than left to fail on a decode.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Environment variables exported by outer terminals that misadvertise the
-/// host capabilities to claude. cmux IS the terminal claude sees; strip these
-/// so claude doesn't try kitty-graphics / iTerm imgcat / tmux-passthrough
+/// host capabilities to the child. cmux IS the terminal the child sees; strip
+/// these so it doesn't try kitty-graphics / iTerm imgcat / tmux-passthrough
 /// escapes that the alacritty parser silently drops. Shared between cmux (local
 /// PTY) and cmuxd (daemon PTY) so the spawn environment matches byte-for-byte.
 pub const TERMINAL_ENV_STRIP: &[&str] = &[
@@ -49,7 +56,7 @@ pub const TERMINAL_ENV_STRIP: &[&str] = &[
 /// canonical TERM + COLORTERM. Returns the (key, value) pairs callers should
 /// install on their spawn command — both `portable-pty` and `std::process`
 /// expose an `env(k, v)` method so this helper stays framework-agnostic.
-pub fn claude_spawn_env() -> Vec<(String, String)> {
+pub fn terminal_spawn_env() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| !TERMINAL_ENV_STRIP.contains(&k.as_str()))
         .collect();
@@ -60,16 +67,77 @@ pub fn claude_spawn_env() -> Vec<(String, String)> {
     out
 }
 
+/// argv for a Claude Code session. Single source of truth for the flags, so
+/// the local-PTY and daemon paths cannot drift apart.
+pub fn claude_command(dangerous: bool, resume_id: Option<&str>) -> Vec<String> {
+    let mut cmd = vec!["claude".to_string()];
+    if dangerous {
+        cmd.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Some(id) = resume_id {
+        cmd.push("--resume".to_string());
+        cmd.push(id.to_string());
+    }
+    cmd
+}
+
 // ---------------------------------------------------------------------------
 // Shared value types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ClaudeStatus {
+pub enum SessionStatus {
     #[default]
     Unknown,
     Busy,
     Idle,
+}
+
+impl SessionStatus {
+    /// Parse the `status` field of a claude session JSON file.
+    pub fn from_status_str(s: &str) -> Self {
+        match s {
+            "busy" => Self::Busy,
+            "idle" => Self::Idle,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// How the daemon should derive status for a session. `None` leaves the
+/// session as a plain PTY with no introspection and no polling timer.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ProbeKind {
+    #[default]
+    None,
+    /// Claude Code: reads `~/.claude/sessions/<pid>.json` for status and name,
+    /// and scans the grid for permission prompts. `dangerous` and `resume_id`
+    /// describe how the session was started, for display only — the flags
+    /// themselves already live in the session's `cmd`.
+    Claude {
+        dangerous: bool,
+        resume_id: Option<String>,
+    },
+}
+
+impl ProbeKind {
+    pub fn dangerous(&self) -> bool {
+        matches!(
+            self,
+            Self::Claude {
+                dangerous: true,
+                ..
+            }
+        )
+    }
+
+    pub fn resume_id(&self) -> Option<&str> {
+        match self {
+            Self::Claude { resume_id, .. } => resume_id.as_deref(),
+            Self::None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,14 +154,16 @@ pub struct SessionInfo {
     pub id: u64,
     pub label: String,
     pub cwd: PathBuf,
-    pub dangerous: bool,
-    pub resume_id: Option<String>,
+    /// argv the daemon exec'd, `cmd[0]` being the program.
+    pub cmd: Vec<String>,
+    pub probe: ProbeKind,
     pub rows: u16,
     pub cols: u16,
     pub spawned_at_ms: u64,
     pub last_active_ms: u64,
-    pub status: ClaudeStatus,
-    pub permission_pending: bool,
+    pub status: SessionStatus,
+    /// The session wants the user to look at it (claude: a permission prompt).
+    pub attention: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,9 +180,12 @@ pub enum Request {
     ListSessions,
     SpawnSession {
         cwd: PathBuf,
-        dangerous: bool,
-        resume_id: Option<String>,
+        /// argv to exec. Must be non-empty; the daemon rejects an empty one.
+        cmd: Vec<String>,
+        probe: ProbeKind,
         label: Option<String>,
+        rows: u16,
+        cols: u16,
     },
     Attach {
         session_id: u64,
@@ -181,9 +254,9 @@ pub enum Event {
     },
     StatusUpdate {
         id: u64,
-        status: ClaudeStatus,
+        status: SessionStatus,
         label: Option<String>,
-        permission_pending: bool,
+        attention: bool,
     },
     /// Daemon → client: replay your snapshot, you lagged.
     Resync {
@@ -280,12 +353,29 @@ mod tests {
     }
 
     #[test]
-    fn request_spawn() {
+    fn request_spawn_generic_command() {
         round_trip(Request::SpawnSession {
             cwd: PathBuf::from("/tmp"),
-            dangerous: true,
-            resume_id: Some("abc".into()),
+            cmd: vec!["bash".into(), "-l".into()],
+            probe: ProbeKind::None,
+            label: Some("shell".into()),
+            rows: 40,
+            cols: 120,
+        });
+    }
+
+    #[test]
+    fn request_spawn_claude_probe() {
+        round_trip(Request::SpawnSession {
+            cwd: PathBuf::from("/tmp"),
+            cmd: claude_command(true, Some("abc")),
+            probe: ProbeKind::Claude {
+                dangerous: true,
+                resume_id: Some("abc".into()),
+            },
             label: Some("dev".into()),
+            rows: 24,
+            cols: 80,
         });
     }
 
@@ -348,16 +438,63 @@ mod tests {
         assert!(matches!(err, FrameError::TooLarge(_)));
     }
 
-    // claude_spawn_env reads $TERM_PROGRAM, $TMUX, …, mutating the process
+    #[test]
+    fn claude_command_matches_the_flags_it_is_given() {
+        assert_eq!(claude_command(false, None), vec!["claude"]);
+        assert_eq!(
+            claude_command(true, None),
+            vec!["claude", "--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            claude_command(false, Some("s1")),
+            vec!["claude", "--resume", "s1"]
+        );
+        assert_eq!(
+            claude_command(true, Some("s1")),
+            vec!["claude", "--dangerously-skip-permissions", "--resume", "s1"]
+        );
+    }
+
+    #[test]
+    fn probe_accessors_read_through_the_claude_variant() {
+        let claude = ProbeKind::Claude {
+            dangerous: true,
+            resume_id: Some("s1".into()),
+        };
+        assert!(claude.dangerous());
+        assert_eq!(claude.resume_id(), Some("s1"));
+
+        let tame = ProbeKind::Claude {
+            dangerous: false,
+            resume_id: None,
+        };
+        assert!(!tame.dangerous());
+        assert_eq!(tame.resume_id(), None);
+
+        assert!(!ProbeKind::None.dangerous());
+        assert_eq!(ProbeKind::None.resume_id(), None);
+    }
+
+    #[test]
+    fn session_status_parses_the_claude_json_field() {
+        assert_eq!(SessionStatus::from_status_str("busy"), SessionStatus::Busy);
+        assert_eq!(SessionStatus::from_status_str("idle"), SessionStatus::Idle);
+        assert_eq!(
+            SessionStatus::from_status_str("something-else"),
+            SessionStatus::Unknown
+        );
+    }
+
+    // terminal_spawn_env reads $TERM_PROGRAM, $TMUX, …, mutating the process
     // env in tests would race with parallel tests in this crate. Instead the
     // test asserts canonical-override behavior using whatever the host env
     // happens to be: TERM/COLORTERM must always equal the cmux defaults, the
     // strip list must never appear in the output regardless of what was set,
     // and unrelated vars must pass through.
     #[test]
-    fn claude_spawn_env_overrides_term_and_strips_listed() {
+    fn terminal_spawn_env_overrides_term_and_strips_listed() {
         let env: std::collections::HashMap<String, String> =
-            claude_spawn_env().into_iter().collect();
+            terminal_spawn_env().into_iter().collect();
 
         // Canonical overrides — no matter what TERM/COLORTERM were set to in
         // the host env, cmux forces these values.
@@ -375,7 +512,7 @@ mod tests {
         ] {
             assert!(
                 !env.contains_key(*name),
-                "{name} should be stripped from claude spawn env"
+                "{name} should be stripped from the spawn env"
             );
         }
 

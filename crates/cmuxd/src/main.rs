@@ -1,5 +1,9 @@
-//! `cmuxd` — long-lived daemon owning every `claude` PTY.
+//! `cmuxd` — long-lived daemon owning one PTY per session.
+//!
+//! The daemon is command-agnostic: it execs whatever argv a client sends, and
+//! delegates anything it can say about the child to a [`probe`].
 
+mod probe;
 mod session;
 
 use std::collections::HashMap;
@@ -213,10 +217,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Spawn a per-session ticker that polls the claude session JSON + scans the
-/// terminal grid for permission prompts. Lives as long as the session does;
+/// Spawn a per-session ticker that runs the session's status probe. A session
+/// with no probe gets no ticker at all. Lives as long as the session does;
 /// downgrades to a Weak so it exits cleanly when the session is dropped.
 fn spawn_status_task(sess: std::sync::Arc<Session>) {
+    if !sess.has_probe() {
+        return;
+    }
     let weak = std::sync::Arc::downgrade(&sess);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -359,9 +366,11 @@ async fn dispatch(
         }
         Request::SpawnSession {
             cwd,
-            dangerous,
-            resume_id,
+            cmd,
+            probe,
             label,
+            rows,
+            cols,
         } => {
             let id = registry.alloc_id();
             let label = label.unwrap_or_else(|| {
@@ -369,7 +378,7 @@ async fn dispatch(
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| cwd.display().to_string())
             });
-            let sess = Session::spawn(id, label, cwd, dangerous, resume_id, 24, 80)
+            let sess = Session::spawn(id, label, cwd, cmd, probe, rows.max(1), cols.max(1))
                 .context("Session::spawn")?;
             registry.insert(sess.clone()).await;
             spawn_status_task(sess.clone());
@@ -435,12 +444,13 @@ async fn dispatch(
         Request::Rename { session_id, label } => {
             if let Some(sess) = registry.get(session_id).await {
                 sess.rename(label);
+                let info = sess.info();
                 let _ = event_tx
                     .send(Event::StatusUpdate {
                         id: session_id,
-                        status: cmux_proto::ClaudeStatus::Unknown,
-                        label: Some(sess.info().label),
-                        permission_pending: false,
+                        status: info.status,
+                        label: Some(info.label),
+                        attention: info.attention,
                     })
                     .await;
             }
@@ -494,7 +504,7 @@ async fn dispatch(
                         id: session_id,
                         status: info.status,
                         label: Some(info.label),
-                        permission_pending: info.permission_pending,
+                        attention: info.attention,
                     })
                     .await;
                 while info_rx.changed().await.is_ok() {
@@ -504,7 +514,7 @@ async fn dispatch(
                             id: session_id,
                             status: info.status,
                             label: Some(info.label),
-                            permission_pending: info.permission_pending,
+                            attention: info.attention,
                         })
                         .await
                         .is_err()

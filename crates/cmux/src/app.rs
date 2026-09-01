@@ -254,19 +254,26 @@ impl App {
             daemon.pending_spawns.lock().unwrap().push_back(mb.clone());
             daemon.request(cmux_proto::Request::SpawnSession {
                 cwd: cwd.clone(),
-                dangerous,
-                resume_id: resume.clone(),
+                cmd: cmux_proto::claude_command(dangerous, resume.as_deref()),
+                probe: cmux_proto::ProbeKind::Claude {
+                    dangerous,
+                    resume_id: resume.clone(),
+                },
                 label: Some(label.clone()),
+                rows,
+                cols,
             })?;
             let info = mb
                 .wait(5_000)
                 .ok_or_else(|| anyhow::anyhow!("daemon did not respond to SpawnSession"))?;
+            let spawned_dangerous = info.probe.dangerous();
+            let spawned_resume = info.probe.resume_id().map(str::to_string);
             let (sess, slot) = Session::new_daemon(
                 id,
                 info.label,
                 info.cwd,
-                info.dangerous,
-                info.resume_id,
+                spawned_dangerous,
+                spawned_resume,
                 rows,
                 cols,
                 None,
@@ -277,12 +284,6 @@ impl App {
             // Subscribe so FrameDelta starts flowing for this session.
             daemon.request(cmux_proto::Request::Subscribe {
                 session_id: info.id,
-            })?;
-            // Push initial resize so daemon sizes claude to our tile.
-            daemon.request(cmux_proto::Request::Resize {
-                session_id: info.id,
-                rows,
-                cols,
             })?;
             sess
         } else {
@@ -306,12 +307,14 @@ impl App {
     ) -> Result<()> {
         let id = self.next_id;
         self.next_id += 1;
+        let dangerous = info.probe.dangerous();
+        let resume_id = info.probe.resume_id().map(str::to_string);
         let (sess, slot) = Session::new_daemon(
             id,
             info.label,
             info.cwd,
-            info.dangerous,
-            info.resume_id,
+            dangerous,
+            resume_id,
             rows,
             cols,
             None,

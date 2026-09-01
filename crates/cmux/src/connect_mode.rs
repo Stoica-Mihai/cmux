@@ -234,7 +234,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
                         id,
                         status,
                         label,
-                        permission_pending,
+                        attention,
                     } => {
                         if let Ok(m) = slots_for_reader.lock()
                             && let Some(slot) = m.get(&id)
@@ -243,7 +243,7 @@ pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
                             *ps = Some(PendingStatus {
                                 status,
                                 label,
-                                permission_pending,
+                                attention,
                             });
                             slot.dirty.store(true, Ordering::Relaxed);
                         }

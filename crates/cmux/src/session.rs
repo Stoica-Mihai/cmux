@@ -31,23 +31,7 @@ const PROMPT_NEEDLES: &[&str] = &[
     "esc to cancel",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClaudeStatus {
-    #[default]
-    Unknown,
-    Busy,
-    Idle,
-}
-
-impl ClaudeStatus {
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "busy" => Self::Busy,
-            "idle" => Self::Idle,
-            _ => Self::Unknown,
-        }
-    }
-}
+pub use cmux_proto::SessionStatus;
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize {
@@ -174,9 +158,9 @@ pub struct DaemonSlot {
 /// owning `Session` struct. Drained on the next `Session::poll_status` tick.
 #[derive(Debug, Clone)]
 pub struct PendingStatus {
-    pub status: cmux_proto::ClaudeStatus,
+    pub status: SessionStatus,
     pub label: Option<String>,
-    pub permission_pending: bool,
+    pub attention: bool,
 }
 
 enum Backend {
@@ -207,9 +191,9 @@ pub struct Session {
     pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
     pub scrollback: Option<TerminalState>,
     pub pid: Option<u32>,
-    pub claude_status: ClaudeStatus,
+    pub status: SessionStatus,
     pub claude_name: Option<String>,
-    pub permission_pending: bool,
+    pub attention: bool,
     pub manually_renamed: bool,
     pub selection: Option<TileSelection>,
     pub mouse_down_at: Option<(u16, u16)>,
@@ -234,16 +218,13 @@ impl Session {
             .openpty(pty_size(rows, cols))
             .context("openpty")?;
 
-        let mut cmd = CommandBuilder::new("claude");
-        if dangerous {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-        if let Some(ref id) = resume {
-            cmd.arg("--resume");
-            cmd.arg(id);
+        let argv = cmux_proto::claude_command(dangerous, resume.as_deref());
+        let mut cmd = CommandBuilder::new(&argv[0]);
+        for arg in &argv[1..] {
+            cmd.arg(arg);
         }
         cmd.cwd(&cwd);
-        for (k, v) in cmux_proto::claude_spawn_env() {
+        for (k, v) in cmux_proto::terminal_spawn_env() {
             cmd.env(k, v);
         }
 
@@ -310,9 +291,9 @@ impl Session {
             byte_ring,
             scrollback: None,
             pid,
-            claude_status: ClaudeStatus::Unknown,
+            status: SessionStatus::Unknown,
             claude_name: None,
-            permission_pending: false,
+            attention: false,
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
@@ -375,9 +356,9 @@ impl Session {
             byte_ring,
             scrollback: None,
             pid,
-            claude_status: ClaudeStatus::Unknown,
+            status: SessionStatus::Unknown,
             claude_name: None,
-            permission_pending: false,
+            attention: false,
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
@@ -408,13 +389,8 @@ impl Session {
             if let Ok(mut ps) = slot.lock()
                 && let Some(p) = ps.take()
             {
-                let mapped = match p.status {
-                    cmux_proto::ClaudeStatus::Busy => ClaudeStatus::Busy,
-                    cmux_proto::ClaudeStatus::Idle => ClaudeStatus::Idle,
-                    cmux_proto::ClaudeStatus::Unknown => ClaudeStatus::Unknown,
-                };
-                if self.claude_status != mapped {
-                    self.claude_status = mapped;
+                if self.status != p.status {
+                    self.status = p.status;
                 }
                 if let Some(n) = p.label
                     && !n.is_empty()
@@ -425,7 +401,7 @@ impl Session {
                     }
                     self.claude_name = Some(n);
                 }
-                self.permission_pending = p.permission_pending;
+                self.attention = p.attention;
             }
             return;
         }
@@ -437,9 +413,9 @@ impl Session {
                 && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
             {
                 if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
-                    let next = ClaudeStatus::from_str(s);
-                    if self.claude_status != next {
-                        self.claude_status = next;
+                    let next = SessionStatus::from_status_str(s);
+                    if self.status != next {
+                        self.status = next;
                     }
                 }
                 if let Some(n) = v.get("name").and_then(|x| x.as_str())
@@ -456,7 +432,7 @@ impl Session {
 
         let last_active = self.last_active_ms.load(Ordering::SeqCst);
         if last_active != self.last_perm_check_active_ms {
-            self.permission_pending = self.detect_permission_prompt();
+            self.attention = self.detect_permission_prompt();
             self.last_perm_check_active_ms = last_active;
         }
     }

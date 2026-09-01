@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::App;
-use crate::session::{ClaudeStatus, Session};
+use crate::session::{Session, SessionStatus};
 use crate::term_render::TermWidget;
 use crate::theme;
 
@@ -204,17 +204,17 @@ fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (St
     if !alive {
         return (theme::glyph::EXITED.into(), theme::ACCENT_RED);
     }
-    if s.permission_pending {
+    if s.attention {
         return (theme::glyph::PERMISSION.into(), theme::ACCENT_RED);
     }
-    let busy = s.claude_status == ClaudeStatus::Busy || age_ms < 1500;
+    let busy = s.status == SessionStatus::Busy || age_ms < 1500;
     if busy {
         return (
             theme::spinner_frame(render_tick).to_string(),
             theme::ACCENT_GREEN,
         );
     }
-    if s.claude_status == ClaudeStatus::Idle {
+    if s.status == SessionStatus::Idle {
         return (theme::glyph::IDLE.into(), theme::ACCENT_CYAN);
     }
     if age_ms < 30_000 {
@@ -225,10 +225,10 @@ fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (St
 
 fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
     let age = crate::util::format_duration_secs(age_ms / 1000, "");
-    let status = match s.claude_status {
-        ClaudeStatus::Busy => "busy",
-        ClaudeStatus::Idle => "idle",
-        ClaudeStatus::Unknown => "—",
+    let status = match s.status {
+        SessionStatus::Busy => "busy",
+        SessionStatus::Idle => "idle",
+        SessionStatus::Unknown => "—",
     };
     let raw = format!("⏱ {}  ·  {}", age, status);
     if raw.chars().count() > max_width {
@@ -302,7 +302,7 @@ fn tile_border_color(
     if !alive {
         return theme::BORDER_DEAD;
     }
-    if session.permission_pending {
+    if session.attention {
         let phase = crate::util::now_ms() / PULSE_PERIOD_MS;
         return if phase.is_multiple_of(2) {
             theme::BORDER_DEAD
@@ -321,13 +321,13 @@ fn tile_border_color(
 }
 
 fn tile_cursor_bg(session: &Session) -> Color {
-    if session.permission_pending {
+    if session.attention {
         return theme::ACCENT_RED;
     }
-    match session.claude_status {
-        ClaudeStatus::Busy => theme::ACCENT_GREEN,
-        ClaudeStatus::Idle => theme::ACCENT_CYAN,
-        ClaudeStatus::Unknown => theme::FG,
+    match session.status {
+        SessionStatus::Busy => theme::ACCENT_GREEN,
+        SessionStatus::Idle => theme::ACCENT_CYAN,
+        SessionStatus::Unknown => theme::FG,
     }
 }
 

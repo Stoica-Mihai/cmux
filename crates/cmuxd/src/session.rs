@@ -1,12 +1,13 @@
 //! Per-PTY session state owned by the daemon.
 //!
 //! Each `Session` owns:
-//! - a `portable_pty::MasterPty` + child process running `claude`
+//! - a `portable_pty::MasterPty` + child process running an arbitrary command
 //! - an `alacritty_terminal::Term` parsed in lockstep by a reader thread
 //! - a 1 MiB raw-byte ring for replay
 //! - a `broadcast::Sender<Vec<u8>>` that fans PTY bytes out to attached
 //!   clients as `FrameDelta` events
 //! - a `watch::Sender<SessionInfo>` that publishes status changes
+//! - an optional [`StatusProbe`], the only part that knows what is running
 //!
 //! ## Lock order
 //!
@@ -33,21 +34,13 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context, Result};
-use cmux_proto::{ClaudeStatus, SessionInfo};
+use cmux_proto::{ProbeKind, SessionInfo, SessionStatus};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, watch};
 
-const PROMPT_NEEDLES: &[&str] = &[
-    "do you want to proceed",
-    "allow this",
-    "apply this edit",
-    "requires approval",
-    "don't ask again",
-    "esc to cancel",
-];
+use crate::probe::{ProbeCtx, StatusProbe};
 
 const SCROLLBACK_LINES: usize = 4096;
 const RING_BYTES_CAP: usize = 1_048_576;
@@ -109,8 +102,9 @@ pub struct Session {
     pub id: u64,
     pub label: Mutex<String>,
     pub cwd: PathBuf,
-    pub dangerous: bool,
-    pub resume_id: Option<String>,
+    /// argv this session was exec'd with, `cmd[0]` being the program.
+    pub cmd: Vec<String>,
+    pub probe_kind: ProbeKind,
     pub term_state: Arc<Mutex<TerminalState>>,
     pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
     pub size: Mutex<(u16, u16)>,
@@ -118,12 +112,11 @@ pub struct Session {
     pub last_active_ms: Arc<AtomicU64>,
     pub alive: Arc<AtomicBool>,
     pub dirty: Arc<AtomicBool>,
-    #[allow(dead_code)]
     pub pid: Option<u32>,
     pub bytes_tx: broadcast::Sender<Vec<u8>>,
     pub info_tx: watch::Sender<SessionInfo>,
-    #[allow(dead_code)]
     pub info_rx: watch::Receiver<SessionInfo>,
+    probe: Option<Box<dyn StatusProbe>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn std::io::Write + Send>>,
     #[allow(dead_code)]
@@ -138,11 +131,15 @@ impl Session {
         id: u64,
         label: String,
         cwd: PathBuf,
-        dangerous: bool,
-        resume: Option<String>,
+        cmd: Vec<String>,
+        probe_kind: ProbeKind,
         rows: u16,
         cols: u16,
     ) -> Result<Arc<Self>> {
+        let Some((program, args)) = cmd.split_first() else {
+            anyhow::bail!("SpawnSession: empty command");
+        };
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -153,20 +150,19 @@ impl Session {
             })
             .context("openpty")?;
 
-        let mut cmd = CommandBuilder::new("claude");
-        if dangerous {
-            cmd.arg("--dangerously-skip-permissions");
+        let mut builder = CommandBuilder::new(program);
+        for arg in args {
+            builder.arg(arg);
         }
-        if let Some(ref rid) = resume {
-            cmd.arg("--resume");
-            cmd.arg(rid);
-        }
-        cmd.cwd(&cwd);
-        for (k, v) in cmux_proto::claude_spawn_env() {
-            cmd.env(k, v);
+        builder.cwd(&cwd);
+        for (k, v) in cmux_proto::terminal_spawn_env() {
+            builder.env(k, v);
         }
 
-        let child = pair.slave.spawn_command(cmd).context("spawn claude")?;
+        let child = pair
+            .slave
+            .spawn_command(builder)
+            .with_context(|| format!("spawn {program}"))?;
         let killer = child.clone_killer();
         drop(pair.slave);
 
@@ -187,14 +183,14 @@ impl Session {
             id,
             label: label.clone(),
             cwd: cwd.clone(),
-            dangerous,
-            resume_id: resume.clone(),
+            cmd: cmd.clone(),
+            probe: probe_kind.clone(),
             rows,
             cols,
             spawned_at_ms: now,
             last_active_ms: now,
-            status: ClaudeStatus::Unknown,
-            permission_pending: false,
+            status: SessionStatus::Unknown,
+            attention: false,
         };
         let (info_tx, info_rx) = watch::channel(info);
 
@@ -241,8 +237,9 @@ impl Session {
             id,
             label: Mutex::new(label),
             cwd,
-            dangerous,
-            resume_id: resume,
+            cmd,
+            probe: crate::probe::build(&probe_kind),
+            probe_kind,
             term_state,
             byte_ring,
             size: Mutex::new((rows, cols)),
@@ -260,6 +257,12 @@ impl Session {
             killer: Mutex::new(killer),
             reader_thread,
         }))
+    }
+
+    /// Whether this session has anything to poll. Sessions without a probe get
+    /// no status ticker at all.
+    pub fn has_probe(&self) -> bool {
+        self.probe.is_some()
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
@@ -313,18 +316,20 @@ impl Session {
     pub fn info(&self) -> SessionInfo {
         let label = self.label.lock().map(|s| s.clone()).unwrap_or_default();
         let (rows, cols) = self.size.lock().map(|s| *s).unwrap_or((24, 80));
+        // status/attention live in the watch channel, written by the probe.
+        let observed = self.info_tx.borrow().clone();
         SessionInfo {
             id: self.id,
             label,
             cwd: self.cwd.clone(),
-            dangerous: self.dangerous,
-            resume_id: self.resume_id.clone(),
+            cmd: self.cmd.clone(),
+            probe: self.probe_kind.clone(),
             rows,
             cols,
             spawned_at_ms: self.spawned_at_ms,
             last_active_ms: self.last_active_ms.load(Ordering::SeqCst),
-            status: ClaudeStatus::Unknown,
-            permission_pending: false,
+            status: observed.status,
+            attention: observed.attention,
         }
     }
 
@@ -336,49 +341,34 @@ impl Session {
         let _ = self.info_tx.send(info);
     }
 
-    /// One pass of the status-polling logic. Reads
-    /// `~/.claude/sessions/<pid>.json`, scans the live grid for the
-    /// permission-prompt heuristics, and updates `info_tx` if any field
-    /// changed.
+    /// One pass of the status probe. No-op when the session has none.
     pub fn poll_status_once(&self) {
+        let Some(probe) = self.probe.as_ref() else {
+            return;
+        };
+        let outcome = {
+            let Ok(t) = self.term_state.lock() else {
+                return;
+            };
+            probe.poll(&ProbeCtx {
+                pid: self.pid,
+                term: &t.term,
+            })
+        };
+
         let mut next = self.info_tx.borrow().clone();
         next.last_active_ms = self.last_active_ms.load(Ordering::SeqCst);
-        if let Some(pid) = self.pid {
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            if let Some(home) = home {
-                let path = home
-                    .join(".claude")
-                    .join("sessions")
-                    .join(format!("{}.json", pid));
-                if let Ok(bytes) = std::fs::read(&path)
-                    && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                {
-                    if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
-                        next.status = match s {
-                            "busy" => ClaudeStatus::Busy,
-                            "idle" => ClaudeStatus::Idle,
-                            _ => ClaudeStatus::Unknown,
-                        };
-                    }
-                    if let Some(n) = v.get("name").and_then(|x| x.as_str())
-                        && !n.is_empty()
-                    {
-                        next.label = n.to_string();
-                    }
-                }
-            }
+        if let Some(s) = outcome.status {
+            next.status = s;
         }
-        // permission-prompt heuristic over the visible grid
-        if let Ok(t) = self.term_state.lock() {
-            next.permission_pending = scan_permission_prompt(&t.term);
+        if let Some(l) = outcome.label {
+            next.label = l;
+        }
+        if let Some(a) = outcome.attention {
+            next.attention = a;
         }
         // emit only when something actually changed
-        let cur = self.info_tx.borrow().clone();
-        if cur.status != next.status
-            || cur.label != next.label
-            || cur.permission_pending != next.permission_pending
-            || cur.last_active_ms != next.last_active_ms
-        {
+        if *self.info_tx.borrow() != next {
             let _ = self.info_tx.send(next);
         }
     }
@@ -404,29 +394,64 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn scan_permission_prompt(term: &Term<VoidListener>) -> bool {
-    let mut text = String::new();
-    let mut last_line: Option<i32> = None;
-    for indexed in term.grid().display_iter() {
-        let line = indexed.point.line.0;
-        if Some(line) != last_line {
-            if last_line.is_some() {
-                text.push('\n');
-            }
-            last_line = Some(line);
-        }
-        if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-            || indexed.cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-        {
-            continue;
-        }
-        let c = indexed.cell.c;
-        text.push(if c == '\0' { ' ' } else { c });
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_rejects_an_empty_command() {
+        let result = Session::spawn(
+            1,
+            "x".into(),
+            PathBuf::from("/tmp"),
+            Vec::<String>::new(),
+            ProbeKind::None,
+            24,
+            80,
+        );
+        let err = match result {
+            Ok(_) => panic!("empty argv must not spawn a session"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("empty command"), "got: {err}");
     }
-    let lower = text.to_lowercase();
-    if PROMPT_NEEDLES.iter().any(|n| lower.contains(n)) {
-        return true;
+
+    #[test]
+    fn spawn_runs_an_arbitrary_program_and_reports_it() {
+        let sess = Session::spawn(
+            7,
+            "echo-test".into(),
+            PathBuf::from("/tmp"),
+            vec!["/bin/echo".into(), "hello".into()],
+            ProbeKind::None,
+            30,
+            100,
+        )
+        .expect("spawn /bin/echo");
+
+        let info = sess.info();
+        assert_eq!(info.cmd, vec!["/bin/echo", "hello"]);
+        assert_eq!(info.probe, ProbeKind::None);
+        assert_eq!((info.rows, info.cols), (30, 100));
+        assert!(!sess.has_probe());
     }
-    let has_yes = lower.contains("1. yes");
-    has_yes && (lower.contains("2. no") || lower.contains("3. no"))
+
+    #[test]
+    fn a_claude_session_gets_a_probe() {
+        let sess = Session::spawn(
+            8,
+            "claude-test".into(),
+            PathBuf::from("/tmp"),
+            vec!["/bin/true".into()],
+            ProbeKind::Claude {
+                dangerous: true,
+                resume_id: None,
+            },
+            24,
+            80,
+        )
+        .expect("spawn");
+        assert!(sess.has_probe());
+        assert!(sess.info().probe.dangerous());
+    }
 }

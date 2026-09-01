@@ -208,17 +208,21 @@ enum Command {
 enum CtlCmd {
     /// List sessions the daemon is currently hosting.
     List,
-    /// Spawn a new claude session in the chosen directory.
+    /// Spawn a new session in the chosen directory. Runs claude unless a
+    /// command is given after `--`, e.g. `cmux ctl spawn . -- bash -l`.
     Spawn {
         /// Working directory for the new session.
         #[arg(default_value = ".")]
         cwd: PathBuf,
-        /// Pass `--dangerously-skip-permissions` to claude.
+        /// Pass `--dangerously-skip-permissions` to claude. Claude only.
         #[arg(long)]
         dangerous: bool,
         /// Display name for the session in the sidebar.
         #[arg(long)]
         label: Option<String>,
+        /// Command to run instead of claude. Everything after `--` is argv.
+        #[arg(last = true)]
+        cmd: Vec<String>,
     },
     /// Kill a session by id.
     Kill {
@@ -245,12 +249,14 @@ fn run_ctl(cmd: CtlCmd) -> Result<()> {
                     } else {
                         for s in sessions {
                             println!(
-                                "[{}] {:<20}  {}  pid={}{}",
+                                "[{}] {:<20}  {}  {}x{}  {}{}",
                                 s.id,
                                 s.label,
                                 s.cwd.display(),
-                                s.spawned_at_ms / 1000,
-                                if s.permission_pending { "  ⚠" } else { "" }
+                                s.rows,
+                                s.cols,
+                                s.cmd.join(" "),
+                                if s.attention { "  ⚠" } else { "" }
                             );
                         }
                     }
@@ -269,17 +275,37 @@ fn run_ctl(cmd: CtlCmd) -> Result<()> {
             cwd,
             dangerous,
             label,
+            cmd,
         } => {
             let cwd: PathBuf = if cwd.as_os_str() == "." {
                 std::env::current_dir().context("getcwd")?
             } else {
                 cwd.canonicalize().unwrap_or(cwd)
             };
+            if dangerous && !cmd.is_empty() {
+                anyhow::bail!(
+                    "--dangerous is a claude flag; drop it when passing your own command"
+                );
+            }
+            let (cmd, probe) = if cmd.is_empty() {
+                (
+                    cmux_proto::claude_command(dangerous, None),
+                    cmux_proto::ProbeKind::Claude {
+                        dangerous,
+                        resume_id: None,
+                    },
+                )
+            } else {
+                (cmd, cmux_proto::ProbeKind::None)
+            };
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
             c.send(&cmux_proto::Request::SpawnSession {
                 cwd: cwd.clone(),
-                dangerous,
-                resume_id: None,
+                cmd,
+                probe,
                 label,
+                rows,
+                cols,
             })?;
             match c.recv()? {
                 cmux_proto::Event::SessionSpawned { id, info } => {
