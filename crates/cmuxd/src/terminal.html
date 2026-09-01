@@ -74,9 +74,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
-const token = params.get("token") || "";
 const want  = params.get("session");          // ?session=N to open one directly
-const auth  = { "Authorization": "Bearer " + token };
 const $ = (id) => document.getElementById(id);
 
 let term, fit, ws, current = null, autoAttached = false;
@@ -99,7 +97,7 @@ async function pushSize() {
   if (current === null || !term) return;
   await fetch(`/api/sessions/${current}/resize`, {
     method: "POST",
-    headers: { ...auth, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ rows: term.rows, cols: term.cols }),
   }).catch(() => {});
 }
@@ -107,9 +105,11 @@ async function pushSize() {
 async function refresh() {
   let sessions = [];
   try {
-    const r = await fetch("/api/sessions", { headers: auth });
-    if (r.status === 401) { $("list").innerHTML =
-      '<p style="padding:10px;color:#ff6b6b">Unauthorized — open the URL cmuxd printed, including ?token=…</p>';
+    const r = await fetch("/api/sessions");
+    // cmuxd never refuses a request; a 401/403 here comes from whatever proxy
+    // is in front of it.
+    if (!r.ok) { $("list").innerHTML =
+      `<p style="padding:10px;color:#ff6b6b">${r.status} from the server in front of cmuxd</p>`;
       return; }
     sessions = await r.json();
   } catch { return; }
@@ -152,7 +152,7 @@ function attach(s) {
   refresh();
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws/sessions/${s.id}?token=${encodeURIComponent(token)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws/sessions/${s.id}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { fit.fit(); pushSize(); term.focus(); };
   ws.onmessage = (e) => {
@@ -167,7 +167,7 @@ $("spawn").onclick = async () => {
   if (!parts.length) return;
   const r = await fetch("/api/sessions", {
     method: "POST",
-    headers: { ...auth, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cmd: parts, rows: term ? term.rows : 40, cols: term ? term.cols : 120 }),
   });
   if (r.ok) attach(await r.json());

@@ -137,22 +137,50 @@ cmuxd --http 127.0.0.1:9000
 cmuxd --http 127.0.0.1:0      # let the kernel pick; the daemon prints the port
 ```
 
-It prints the URL on start and writes the bearer token to
-`$XDG_RUNTIME_DIR/cmux/http-token` with mode 0600:
+It prints the address it bound:
 
 ```
 cmuxd http api on http://127.0.0.1:7070
-  browser: http://127.0.0.1:7070/?token=5d8faf7a…
-  token:   /run/user/1000/cmux/http-token (mode 0600)
+  no authentication: whoever reaches this port runs commands as you.
+  front it with a tunnel or an authenticating proxy before exposing it.
 ```
 
-> **A session is an arbitrary command, so reaching this API is equivalent to
-> running code as the daemon's user.** It binds loopback and demands the token
-> on every request, including the browser page. Set `CMUXD_HTTP_TOKEN` to pin
-> your own. Do not bind a public interface without authenticated TLS in front.
+### Access control is yours, not the daemon's
 
-Send `Authorization: Bearer <token>`, or `?token=<token>` for browsers and
-WebSockets, neither of which can set headers.
+**cmuxd does no authentication.** A session is an arbitrary command, so anything
+that can reach the port runs code as your user. The daemon's job is brokering
+PTYs; deciding who may reach it belongs to whatever you put in front, which does
+that job properly — real credentials, TLS, revocation — instead of a second,
+weaker copy inside the daemon.
+
+The default bind is loopback. That is not a security control, it is the address
+a tunnel connects to.
+
+**An SSH tunnel**, if you already have a login on the machine:
+
+```sh
+# on cmuxd's machine
+cmuxd --http 127.0.0.1:7070
+
+# from your laptop
+ssh -N -L 7070:127.0.0.1:7070 you@that-machine
+# then open http://127.0.0.1:7070
+```
+
+**A peer-to-peer tunnel**, with no public IP or port forwarding:
+
+```sh
+npm i -g holesail
+holesail --live 7070          # on cmuxd's machine; prints a connector key
+holesail --connect <key>      # anywhere else
+```
+
+**A reverse proxy**, to put more than one person on it: terminate TLS and
+authenticate there, then proxy `/api`, `/ws` and `/`. The WebSocket route needs
+the `Upgrade` and `Connection` headers passed through.
+
+Whichever you pick, leave cmuxd bound to loopback so the only way in is the one
+you authenticated.
 
 | Method | Path | Does |
 |---|---|---|
@@ -171,17 +199,14 @@ WebSockets, neither of which can set headers.
 ### From a shell
 
 ```sh
-T=$(cat "$XDG_RUNTIME_DIR/cmux/http-token")
-A="Authorization: Bearer $T"
+curl localhost:7070/api/sessions
 
-curl -H "$A" localhost:7070/api/sessions
-
-curl -H "$A" -H 'Content-Type: application/json' \
+curl -H 'Content-Type: application/json' \
   -d '{"cmd":["python3","-q"],"label":"repl"}' \
   localhost:7070/api/sessions
 
-curl -H "$A" --data-binary $'print(2**10)\n' localhost:7070/api/sessions/1/input
-curl -H "$A" localhost:7070/api/sessions/1/screen
+curl --data-binary $'print(2**10)\n' localhost:7070/api/sessions/1/input
+curl localhost:7070/api/sessions/1/screen
 ```
 
 Reach for `screen` first — it hands back the terminal as text, with no escape
@@ -189,9 +214,9 @@ sequences to parse.
 
 ### In a browser
 
-Open the URL the daemon printed. The page lists sessions, attaches to one over
-the WebSocket, forwards keystrokes and pushes the rendered size back to the PTY.
-`?session=N` opens a specific one; otherwise it attaches to the first. The
+Open the address the daemon printed. The page lists sessions, attaches to one
+over the WebSocket, forwards keystrokes and pushes the rendered size back to the
+PTY. `?session=N` opens a specific one; otherwise it attaches to the first. The
 renderer is xterm.js from a CDN, so that page needs internet even though the
 daemon does not.
 

@@ -6,9 +6,16 @@
 //! on a session's screen, send input, stream output live, and open any of it
 //! in a browser.
 //!
-//! Off unless `--http` is passed. It binds loopback by default and requires a
-//! bearer token, because a session is an arbitrary command — reaching this API
-//! is equivalent to running code as the daemon's user.
+//! ## There is no authentication here, deliberately
+//!
+//! Anything that can reach the port can spawn and drive arbitrary commands as
+//! the daemon's user. Deciding who may reach it is the operator's job, handled
+//! by whatever fronts the port — an SSH tunnel, a peer-to-peer tunnel, a
+//! reverse proxy that authenticates. The daemon binds where it is told and
+//! serves; it does not try to be a second, weaker copy of that.
+//!
+//! The default bind is loopback, which is not a security control but the
+//! address a tunnel connects to.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,9 +24,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
-use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, body::Bytes};
@@ -28,34 +34,18 @@ use tokio::sync::broadcast;
 
 use crate::Registry;
 
-#[derive(Clone)]
-struct HttpState {
-    registry: Arc<Registry>,
-    token: Arc<String>,
-}
-
-/// 32 bytes of urandom, hex encoded.
-pub(crate) fn generate_token() -> Result<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom").context("open /dev/urandom")?;
-    let mut buf = [0u8; 32];
-    f.read_exact(&mut buf).context("read /dev/urandom")?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// Bind and serve in the background. Returns the address actually bound, so a
 /// caller can pass port 0 and still print a usable URL.
 pub(crate) async fn serve(
     addr: &str,
     registry: Arc<Registry>,
-    token: String,
     mut shutdown: broadcast::Receiver<()>,
 ) -> Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     let bound = listener.local_addr().context("local_addr")?;
-    let app = router(registry, token);
+    let app = router(registry);
     tokio::spawn(async move {
         let served = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -69,11 +59,7 @@ pub(crate) async fn serve(
     Ok(bound)
 }
 
-fn router(registry: Arc<Registry>, token: String) -> Router {
-    let state = HttpState {
-        registry,
-        token: Arc::new(token),
-    };
+fn router(registry: Arc<Registry>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
@@ -87,53 +73,7 @@ fn router(registry: Arc<Registry>, token: String) -> Router {
         .route("/api/sessions/{id}/input", post(input))
         .route("/api/sessions/{id}/resize", post(resize))
         .route("/ws/sessions/{id}", get(ws_session))
-        // Applied to the whole router rather than per handler, so a new route
-        // cannot be added unauthenticated by forgetting a check.
-        .layer(middleware::from_fn_with_state(state.clone(), require_token))
-        .with_state(state)
-}
-
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-fn query_param(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == key).then(|| v.to_string())
-    })
-}
-
-/// Length-checked, non-short-circuiting compare.
-fn tokens_match(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// Bearer header, or `?token=` so a browser can open the page and a WebSocket
-/// (neither of which can set headers).
-fn supplied_token(req: &Request) -> Option<String> {
-    let header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    header.or_else(|| req.uri().query().and_then(|q| query_param(q, "token")))
-}
-
-async fn require_token(State(st): State<HttpState>, req: Request, next: Next) -> Response {
-    match supplied_token(&req) {
-        Some(t) if tokens_match(&t, &st.token) => next.run(req).await,
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            "missing or invalid token; pass Authorization: Bearer <token> or ?token=<token>\n",
-        )
-            .into_response(),
-    }
+        .with_state(registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,17 +96,19 @@ struct Health {
     sessions: usize,
 }
 
-async fn health(State(st): State<HttpState>) -> Json<Health> {
+async fn health(State(registry): State<Arc<Registry>>) -> Json<Health> {
     Json(Health {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         protocol: cmux_proto::PROTOCOL_VERSION,
-        sessions: st.registry.sessions.lock().await.len(),
+        sessions: registry.sessions.lock().await.len(),
     })
 }
 
-async fn list_sessions(State(st): State<HttpState>) -> Json<Vec<cmux_proto::SessionInfo>> {
-    Json(st.registry.list().await)
+async fn list_sessions(
+    State(registry): State<Arc<Registry>>,
+) -> Json<Vec<cmux_proto::SessionInfo>> {
+    Json(registry.list().await)
 }
 
 #[derive(Deserialize)]
@@ -189,20 +131,17 @@ fn default_cols() -> u16 {
     80
 }
 
-async fn spawn_session(State(st): State<HttpState>, Json(body): Json<SpawnBody>) -> Response {
+async fn spawn_session(
+    State(registry): State<Arc<Registry>>,
+    Json(body): Json<SpawnBody>,
+) -> Response {
     let cwd = body.cwd.map(PathBuf::from).unwrap_or_else(|| {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"))
     });
     match crate::spawn_session(
-        &st.registry,
-        cwd,
-        body.cmd,
-        body.probe,
-        body.label,
-        body.rows,
-        body.cols,
+        &registry, cwd, body.cmd, body.probe, body.label, body.rows, body.cols,
     )
     .await
     {
@@ -211,15 +150,15 @@ async fn spawn_session(State(st): State<HttpState>, Json(body): Json<SpawnBody>)
     }
 }
 
-async fn get_session(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
-    match st.registry.get(id).await {
+async fn get_session(State(registry): State<Arc<Registry>>, Path(id): Path<u64>) -> Response {
+    match registry.get(id).await {
         Some(sess) => Json(sess.info()).into_response(),
         None => no_such_session(id),
     }
 }
 
-async fn delete_session(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
-    match st.registry.remove(id).await {
+async fn delete_session(State(registry): State<Arc<Registry>>, Path(id): Path<u64>) -> Response {
+    match registry.remove(id).await {
         Some(sess) => {
             sess.kill();
             StatusCode::NO_CONTENT.into_response()
@@ -230,8 +169,8 @@ async fn delete_session(State(st): State<HttpState>, Path(id): Path<u64>) -> Res
 
 /// The visible grid as plain text — the cheapest way to see what a session is
 /// showing without speaking the protocol or rendering escape sequences.
-async fn screen(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
-    let Some(sess) = st.registry.get(id).await else {
+async fn screen(State(registry): State<Arc<Registry>>, Path(id): Path<u64>) -> Response {
+    let Some(sess) = registry.get(id).await else {
         return no_such_session(id);
     };
     let text = match sess.term_state.lock() {
@@ -248,8 +187,8 @@ async fn screen(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
 }
 
 /// Raw replay ring: every byte the PTY produced, escape sequences included.
-async fn buffer(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
-    match st.registry.get(id).await {
+async fn buffer(State(registry): State<Arc<Registry>>, Path(id): Path<u64>) -> Response {
+    match registry.get(id).await {
         Some(sess) => (
             [(header::CONTENT_TYPE, "application/octet-stream")],
             sess.ring_snapshot(),
@@ -261,8 +200,12 @@ async fn buffer(State(st): State<HttpState>, Path(id): Path<u64>) -> Response {
 
 /// Body bytes go to the PTY verbatim, so escape sequences and control
 /// characters work as typed.
-async fn input(State(st): State<HttpState>, Path(id): Path<u64>, body: Bytes) -> Response {
-    let Some(sess) = st.registry.get(id).await else {
+async fn input(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<u64>,
+    body: Bytes,
+) -> Response {
+    let Some(sess) = registry.get(id).await else {
         return no_such_session(id);
     };
     match sess.write_input(&body) {
@@ -278,11 +221,11 @@ struct ResizeBody {
 }
 
 async fn resize(
-    State(st): State<HttpState>,
+    State(registry): State<Arc<Registry>>,
     Path(id): Path<u64>,
     Json(body): Json<ResizeBody>,
 ) -> Response {
-    let Some(sess) = st.registry.get(id).await else {
+    let Some(sess) = registry.get(id).await else {
         return no_such_session(id);
     };
     match sess.resize(body.rows.max(1), body.cols.max(1)) {
@@ -298,14 +241,14 @@ async fn resize(
 async fn ws_session(
     ws: WebSocketUpgrade,
     Path(id): Path<u64>,
-    State(st): State<HttpState>,
+    State(registry): State<Arc<Registry>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| pump(socket, id, st))
+    ws.on_upgrade(move |socket| pump(socket, id, registry))
 }
 
 /// Bytes out, input in. Replays the ring first so a fresh tab is not blank.
-async fn pump(mut socket: WebSocket, id: u64, st: HttpState) {
-    let Some(sess) = st.registry.get(id).await else {
+async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
+    let Some(sess) = registry.get(id).await else {
         let _ = socket
             .send(Message::Text(format!("no session {id}").into()))
             .await;
@@ -349,37 +292,55 @@ async fn pump(mut socket: WebSocket, id: u64, st: HttpState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn tokens_match_only_on_an_exact_match() {
-        assert!(tokens_match("abc123", "abc123"));
-        assert!(!tokens_match("abc123", "abc124"));
-        // A prefix must not pass, which a length-blind compare would allow.
-        assert!(!tokens_match("abc", "abc123"));
-        assert!(!tokens_match("abc123", "abc"));
-        assert!(!tokens_match("", "abc"));
-        assert!(tokens_match("", ""));
+    /// Serve the router on an ephemeral port. The returned sender must be kept
+    /// alive: dropping it closes the channel, which fires the graceful-shutdown
+    /// future and stops the server mid-test.
+    async fn spawn_server() -> (SocketAddr, broadcast::Sender<()>) {
+        let registry = Arc::new(Registry::new());
+        let (tx, rx) = broadcast::channel::<()>(1);
+        let addr = serve("127.0.0.1:0", registry, rx).await.expect("serve");
+        (addr, tx)
     }
 
-    #[test]
-    fn query_param_picks_the_right_key() {
-        assert_eq!(query_param("token=xyz", "token").as_deref(), Some("xyz"));
-        assert_eq!(
-            query_param("a=1&token=xyz&b=2", "token").as_deref(),
-            Some("xyz")
+    /// Minimal HTTP/1.1 GET, so the test needs no client dependency.
+    async fn get(addr: SocketAddr, path: &str) -> String {
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).await.expect("write");
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.expect("read");
+        out
+    }
+
+    /// The contract after auth was removed: no credential is asked for, and
+    /// none is required. Access control belongs to whatever fronts the port.
+    #[tokio::test]
+    async fn every_route_answers_without_credentials() {
+        let (addr, _keepalive) = spawn_server().await;
+
+        let health = get(addr, "/api/health").await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.contains("\"ok\":true"), "{health}");
+        assert!(
+            !health.to_lowercase().contains("www-authenticate"),
+            "must not challenge for credentials: {health}"
         );
-        assert_eq!(query_param("a=1&b=2", "token"), None);
-        // A key that merely contains "token" must not match.
-        assert_eq!(query_param("mytoken=xyz", "token"), None);
-        assert_eq!(query_param("", "token"), None);
+
+        let list = get(addr, "/api/sessions").await;
+        assert!(list.starts_with("HTTP/1.1 200"), "{list}");
+        assert!(list.contains("[]"), "empty registry lists nothing: {list}");
+
+        let page = get(addr, "/").await;
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("<title>cmuxd</title>"), "{page}");
     }
 
-    #[test]
-    fn generated_tokens_are_long_and_unique() {
-        let a = generate_token().expect("token");
-        let b = generate_token().expect("token");
-        assert_eq!(a.len(), 64, "32 bytes hex encoded");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b);
+    #[tokio::test]
+    async fn an_unknown_session_is_a_404() {
+        let (addr, _keepalive) = spawn_server().await;
+        let res = get(addr, "/api/sessions/42/screen").await;
+        assert!(res.starts_with("HTTP/1.1 404"), "{res}");
     }
 }

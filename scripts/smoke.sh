@@ -123,47 +123,43 @@ check "the other sessions survive the kill" "sleep 120" "$AFTER"
 echo
 echo "http api"
 HTTP="$(sed -n 's|^cmuxd http api on \(http://[0-9.:]*\)$|\1|p' "$WORK/cmuxd.log" | head -1)"
-TOKEN_FILE="$XDG_RUNTIME_DIR/cmux/http-token"
 if ! command -v curl >/dev/null; then
   echo "  skip  no curl on PATH"
-elif [ -z "$HTTP" ] || [ ! -f "$TOKEN_FILE" ]; then
-  bad "http api came up" "no address in cmuxd.log, or no token file"
+elif [ -z "$HTTP" ]; then
+  bad "http api came up" "no address in cmuxd.log"
 else
   ok "http api bound $HTTP"
-  TOKEN="$(cat "$TOKEN_FILE")"
-  A=(-H "Authorization: Bearer $TOKEN")
-
-  perms="$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || stat -f '%Lp' "$TOKEN_FILE")"
-  if [ "$perms" = "600" ]; then ok "token file is mode 0600"
-  else bad "token file is mode 0600" "got $perms"; fi
-
   code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
-  [ "$(code "$HTTP/api/health")" = "401" ] \
-    && ok "unauthenticated request is refused" \
-    || bad "unauthenticated request is refused" "got $(code "$HTTP/api/health")"
-  [ "$(code -H 'Authorization: Bearer wrong' "$HTTP/api/health")" = "401" ] \
-    && ok "a wrong token is refused" || bad "a wrong token is refused"
-  [ "$(code "${A[@]}" "$HTTP/api/health")" = "200" ] \
-    && ok "a good token is accepted" || bad "a good token is accepted"
-  [ "$(code "$HTTP/api/health?token=$TOKEN")" = "200" ] \
-    && ok "?token= works (browsers cannot set headers)" \
-    || bad "?token= works"
 
-  NEW="$(curl -s "${A[@]}" -H 'Content-Type: application/json' \
+  # cmuxd does no authentication on purpose: access control belongs to
+  # whatever fronts the port. These assert that, so re-adding a check inside
+  # the daemon fails here rather than silently changing the contract.
+  [ "$(code "$HTTP/api/health")" = "200" ] \
+    && ok "serves without credentials, by design" \
+    || bad "serves without credentials" "got $(code "$HTTP/api/health")"
+  [ "$(code "$HTTP/api/sessions")" = "200" ] \
+    && ok "listing needs no credentials" || bad "listing needs no credentials"
+  if [ -e "$XDG_RUNTIME_DIR/cmux/http-token" ]; then
+    bad "no token file is written" "found one; the daemon should hold no secret"
+  else
+    ok "no token file is written"
+  fi
+
+  NEW="$(curl -s -H 'Content-Type: application/json' \
     -d '{"cmd":["bash","--norc","--noprofile"],"cwd":"/tmp","label":"http"}' \
     "$HTTP/api/sessions")"
   check "spawns a session over HTTP" '"label":"http"' "$NEW"
   NEW_ID="$(printf '%s' "$NEW" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
 
-  curl -s -o /dev/null "${A[@]}" --data-binary $'echo SMOKE-OVER-HTTP-$((6*7))\n' \
+  curl -s -o /dev/null --data-binary $'echo SMOKE-OVER-HTTP-$((6*7))\n' \
     "$HTTP/api/sessions/$NEW_ID/input"
   sleep 1
   check "input reaches the pty and shows on the screen" "SMOKE-OVER-HTTP-42" \
-    "$(curl -s "${A[@]}" "$HTTP/api/sessions/$NEW_ID/screen")"
+    "$(curl -s "$HTTP/api/sessions/$NEW_ID/screen")"
 
-  [ "$(code "${A[@]}" "$HTTP/api/sessions/9999/screen")" = "404" ] \
+  [ "$(code "$HTTP/api/sessions/9999/screen")" = "404" ] \
     && ok "unknown session is a 404" || bad "unknown session is a 404"
-  [ "$(code "$HTTP/?token=$TOKEN")" = "200" ] \
+  [ "$(code "$HTTP/")" = "200" ] \
     && ok "browser page is served" || bad "browser page is served"
 fi
 

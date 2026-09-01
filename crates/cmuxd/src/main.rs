@@ -36,14 +36,14 @@ Hosts one PTY per session, on $XDG_RUNTIME_DIR/cmux/cmuxd.sock (fallback
 /tmp/cmux-<uid>/<home>/cmux). Drive it with `cmux --connect` or `cmux ctl`.
 
   --http [ADDR]  also serve the HTTP + WebSocket API, default 127.0.0.1:7070.
-                 Prints a URL carrying a bearer token, and writes that token to
-                 <runtime-dir>/cmux/http-token with mode 0600.
+                 It has NO authentication: whoever reaches the port runs
+                 commands as you. Front it with a tunnel or an authenticating
+                 proxy rather than binding it somewhere reachable.
   -h, --help     print this message
   -V, --version  print the version
 
 Environment:
-  CMUXD_LOG         tracing filter, e.g. `debug` or `cmuxd=trace,info`
-  CMUXD_HTTP_TOKEN  use this token rather than generating one";
+  CMUXD_LOG      tracing filter, e.g. `debug` or `cmuxd=trace,info`";
 
 /// Runtime options. Only `--http` is configurable; everything else is derived.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -270,27 +270,13 @@ async fn main() -> Result<()> {
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     if let Some(addr) = config.http.as_deref() {
-        let token = match std::env::var("CMUXD_HTTP_TOKEN") {
-            Ok(t) if !t.is_empty() => t,
-            _ => http::generate_token().context("generate http token")?,
-        };
-        let token_path = dir.join("http-token");
-        fs::write(&token_path, &token)
-            .with_context(|| format!("write {}", token_path.display()))?;
-        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).ok();
-
-        let bound = http::serve(
-            addr,
-            registry.clone(),
-            token.clone(),
-            shutdown_tx.subscribe(),
-        )
-        .await
-        .context("start http api")?;
+        let bound = http::serve(addr, registry.clone(), shutdown_tx.subscribe())
+            .await
+            .context("start http api")?;
         tracing::info!(%bound, "http api listening");
         println!("cmuxd http api on http://{bound}");
-        println!("  browser: http://{bound}/?token={token}");
-        println!("  token:   {} (mode 0600)", token_path.display());
+        println!("  no authentication: whoever reaches this port runs commands as you.");
+        println!("  front it with a tunnel or an authenticating proxy before exposing it.");
     }
 
     let accept_shutdown = shutdown_tx.clone();
@@ -340,7 +326,6 @@ async fn main() -> Result<()> {
 
     let _ = fs::remove_file(&sock);
     let _ = fs::remove_file(&ready);
-    let _ = fs::remove_file(dir.join("http-token"));
     Ok(())
 }
 
