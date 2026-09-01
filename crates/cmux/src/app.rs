@@ -346,6 +346,10 @@ impl App {
 
     pub fn detach_focused(&mut self) {
         if self.focus < self.sessions.len() {
+            // End the session, not just this view of it. Dropping the handle
+            // kills a local PTY but leaves a daemon-hosted one running, where
+            // it stays visible to every other client and to the browser.
+            self.sessions[self.focus].kill();
             self.sessions.remove(self.focus);
             if self.focus >= self.sessions.len() && !self.sessions.is_empty() {
                 self.focus = self.sessions.len() - 1;
@@ -364,6 +368,51 @@ impl App {
         for s in self.sessions.iter_mut() {
             let _ = s.is_alive();
             s.poll_status();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Session;
+    use std::sync::mpsc;
+
+    /// Detach must remove the tile *and* end the session. While it only
+    /// dropped the handle, a daemon-hosted session stayed alive and kept
+    /// showing up in every other client, the browser included.
+    #[test]
+    fn detaching_ends_the_session_on_the_daemon_too() {
+        let (tx, rx) = mpsc::channel();
+        let (sess, _slot) = Session::new_daemon(
+            1,
+            "s".into(),
+            PathBuf::from("/tmp"),
+            false,
+            None,
+            24,
+            80,
+            None,
+            5,
+            tx,
+        );
+        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
+        app.sessions.push(sess);
+        app.focus = 0;
+
+        app.detach_focused();
+
+        assert!(app.sessions.is_empty(), "the tile should be gone");
+        match rx.try_recv() {
+            Ok(cmux_proto::Request::Detach {
+                session_id,
+                keep_session,
+            }) => {
+                assert_eq!(session_id, 5);
+                assert!(!keep_session, "detach must end it, not park it");
+            }
+            Ok(other) => panic!("expected Detach, got {other:?}"),
+            Err(_) => panic!("the daemon was never told; the session leaks"),
         }
     }
 }

@@ -120,6 +120,9 @@ pub struct Session {
     pub last_active_ms: Arc<AtomicU64>,
     pub alive: Arc<AtomicBool>,
     pub dirty: Arc<AtomicBool>,
+    /// Set once someone renames the session, after which the probe stops
+    /// overwriting the label with whatever the child calls itself.
+    manually_renamed: AtomicBool,
     pub pid: Option<u32>,
     pub bytes_tx: broadcast::Sender<Vec<u8>>,
     pub info_tx: watch::Sender<SessionInfo>,
@@ -257,6 +260,7 @@ impl Session {
             last_active_ms,
             alive,
             dirty,
+            manually_renamed: AtomicBool::new(false),
             pid,
             bytes_tx,
             info_tx,
@@ -411,7 +415,26 @@ impl Session {
         }
     }
 
+    /// Adopt a name the probe read off the child, unless someone has renamed
+    /// the session. Updates the label `info()` reports: writing only the watch
+    /// channel left ListSessions and the HTTP API showing the spawn-time name
+    /// while attached clients showed the probe's, so the terminal and the
+    /// browser named the same session differently. Returns whether it applied.
+    fn take_probe_label(&self, label: &str) -> bool {
+        if self.manually_renamed.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.label.lock() {
+            Ok(mut current) => {
+                *current = label.to_string();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn rename(&self, new_label: String) {
+        self.manually_renamed.store(true, Ordering::SeqCst);
         if let Ok(mut l) = self.label.lock() {
             *l = new_label;
         }
@@ -440,7 +463,8 @@ impl Session {
             next.status = s;
         }
         if let Some(l) = outcome.label {
-            next.label = l;
+            next.label = l.clone();
+            self.take_probe_label(&l);
         }
         if let Some(a) = outcome.attention {
             next.attention = a;
@@ -512,6 +536,39 @@ mod tests {
         assert_eq!(info.probe, ProbeKind::None);
         assert_eq!((info.rows, info.cols), (30, 100));
         assert!(!sess.has_probe());
+    }
+
+    /// Both directions: a probe name must reach `info()` — the browser reads
+    /// that — but must not clobber a name the user chose.
+    #[test]
+    fn the_probe_names_a_session_until_someone_renames_it() {
+        let sess = Session::spawn(
+            9,
+            "spawned".into(),
+            PathBuf::from("/tmp"),
+            vec!["/bin/sleep".into(), "30".into()],
+            ProbeKind::None,
+            24,
+            80,
+        )
+        .expect("spawn");
+        assert_eq!(sess.info().label, "spawned");
+
+        assert!(sess.take_probe_label("probe-named"));
+        assert_eq!(
+            sess.info().label,
+            "probe-named",
+            "the API the browser reads must see the probe's name"
+        );
+
+        sess.rename("mine".into());
+        assert_eq!(sess.info().label, "mine");
+        assert!(
+            !sess.take_probe_label("probe-again"),
+            "a manual rename must survive the next probe tick"
+        );
+        assert_eq!(sess.info().label, "mine");
+        sess.kill();
     }
 
     #[test]

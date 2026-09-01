@@ -531,9 +531,9 @@ impl Session {
         }
     }
 
-    /// Hard-kill: ends the underlying claude process. For daemon mode this
-    /// sends `Detach { keep_session: false }`.
-    #[allow(dead_code)]
+    /// Hard-kill: ends the underlying process. For daemon mode this sends
+    /// `Detach { keep_session: false }`, so the session goes away for every
+    /// client rather than only this one.
     pub fn kill(&mut self) {
         match &mut self.backend {
             Backend::Local { killer, .. } => {
@@ -569,6 +569,78 @@ impl Drop for Session {
         if let Backend::Local { killer, .. } = &mut self.backend {
             let _ = killer.kill();
             self.alive.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn daemon_session(remote_id: u64) -> (Session, mpsc::Receiver<ProtoRequest>) {
+        let (tx, rx) = mpsc::channel();
+        let (sess, _slot) = Session::new_daemon(
+            1,
+            "s".into(),
+            PathBuf::from("/tmp"),
+            false,
+            None,
+            24,
+            80,
+            None,
+            remote_id,
+            tx,
+        );
+        (sess, rx)
+    }
+
+    /// The confirm dialog promises the process will be killed. Dropping a
+    /// daemon-backed handle does not do that, so kill() has to say so — or the
+    /// session lives on, still listed by every other client.
+    #[test]
+    fn killing_a_daemon_session_ends_it_for_everyone() {
+        let (mut sess, rx) = daemon_session(42);
+        sess.kill();
+        match rx.try_recv().expect("kill should send a request") {
+            ProtoRequest::Detach {
+                session_id,
+                keep_session,
+            } => {
+                assert_eq!(session_id, 42);
+                assert!(!keep_session, "kill must end the session, not park it");
+            }
+            other => panic!("expected Detach, got {other:?}"),
+        }
+    }
+
+    /// The opposite case: quitting the TUI must leave sessions running.
+    #[test]
+    fn detach_keep_parks_the_session() {
+        let (mut sess, rx) = daemon_session(7);
+        sess.detach_keep();
+        match rx.try_recv().expect("detach_keep should send a request") {
+            ProtoRequest::Detach {
+                session_id,
+                keep_session,
+            } => {
+                assert_eq!(session_id, 7);
+                assert!(keep_session, "quitting must not kill the sessions");
+            }
+            other => panic!("expected Detach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn renaming_a_daemon_session_tells_the_daemon() {
+        let (mut sess, rx) = daemon_session(3);
+        sess.set_label("renamed".into());
+        assert_eq!(sess.label, "renamed");
+        match rx.try_recv().expect("set_label should send a request") {
+            ProtoRequest::Rename { session_id, label } => {
+                assert_eq!(session_id, 3);
+                assert_eq!(label, "renamed");
+            }
+            other => panic!("expected Rename, got {other:?}"),
         }
     }
 }
