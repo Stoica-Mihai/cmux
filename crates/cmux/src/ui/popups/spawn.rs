@@ -11,7 +11,7 @@ use crate::keys;
 use crate::theme;
 
 use crate::ui::popups::dangerous::draw_dangerous_panel;
-use crate::ui::widgets::{collapse_cwd, kbd_chip, open_popup, selection_strip, viewport_window};
+use crate::ui::widgets::{collapse_cwd, kbd_chip, open_popup, selection_bg, viewport_window};
 
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
     let w = area.width.saturating_sub(8).clamp(50, 90);
@@ -21,7 +21,7 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
         area,
         w,
         h,
-        " Spawn claude — pick a folder ",
+        " Spawn claude in a folder ",
         theme::ACCENT_CYAN,
     );
 
@@ -66,7 +66,7 @@ fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
     if spawn.entries.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  (no subdirectories — press Enter to spawn here, or ← to go up)",
+                "  (no subdirectories. Enter spawns here, ← goes up)",
                 Style::default().fg(theme::FG_DIM),
             ))),
             list_area,
@@ -101,7 +101,7 @@ fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
 
 fn draw_dir_row(f: &mut Frame, row_rect: Rect, name: &str, is_sel: bool) {
     if is_sel {
-        selection_strip(f, row_rect, theme::ACCENT_CYAN);
+        selection_bg(f, row_rect);
     }
     let text_rect = Rect {
         x: row_rect.x + 2,

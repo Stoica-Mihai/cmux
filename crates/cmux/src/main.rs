@@ -886,7 +886,7 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
             match app.spawn_resume(cwd, dangerous, session_id) {
                 Ok(()) => {
                     app.status = format!(
-                        "resumed session [{}]  ·  {}",
+                        "resumed session [{}]  {}",
                         app.sessions.len(),
                         util::prefix_hint()
                     );
@@ -945,7 +945,7 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
         match app.spawn_session(chosen, dangerous) {
             Ok(()) => {
                 app.status = format!(
-                    "spawned session [{}]  ·  {}",
+                    "spawned session [{}]  {}",
                     app.sessions.len(),
                     util::prefix_hint()
                 );

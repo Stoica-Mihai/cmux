@@ -11,7 +11,7 @@ use crate::session::{Session, SessionStatus};
 use crate::term_render::TermWidget;
 use crate::theme;
 
-use super::widgets::{collapse_cwd, selection_strip, titled_block, truncate};
+use super::widgets::{collapse_cwd, selection_bg, titled_block, truncate};
 
 pub(super) fn draw_dashboard(
     f: &mut Frame,
@@ -106,7 +106,7 @@ fn draw_sidebar_row(
     let (badge_glyph, badge_color) = sidebar_badge(s, alive, age_ms, render_tick);
 
     if focused {
-        selection_strip(f, row_area, theme::BORDER_FOCUS);
+        selection_bg(f, row_area);
     }
 
     let text_area = Rect {
@@ -228,9 +228,9 @@ fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
     let status = match s.status {
         SessionStatus::Busy => "busy",
         SessionStatus::Idle => "idle",
-        SessionStatus::Unknown => "—",
+        SessionStatus::Unknown => "-",
     };
-    let raw = format!("⏱ {}  ·  {}", age, status);
+    let raw = format!("⏱ {}  {}", age, status);
     if raw.chars().count() > max_width {
         raw.chars().take(max_width).collect()
     } else {

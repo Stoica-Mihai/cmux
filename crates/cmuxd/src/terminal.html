@@ -76,7 +76,7 @@
   <div id="bar">no session selected</div>
   <!-- One child, so the flex container does not turn the text and <br> into
        separate anonymous flex items and drop the line break. -->
-  <div id="empty"><div>No sessions yet — spawn one from the panel, or run<br>
+  <div id="empty"><div>No sessions yet. Spawn one from the panel, or run<br>
     <code>cmux ctl spawn . -- bash -l</code></div></div>
   <div id="term" hidden></div>
 </main>
@@ -152,7 +152,7 @@ async function refresh() {
     row.innerHTML =
       `<div class="name">[${s.id}] ${escapeHtml(s.label)} ${badges.join(" ")}</div>` +
       `<div class="cmd">${escapeHtml(s.cmd.join(" "))}</div>` +
-      `<div class="cwd">${escapeHtml(s.cwd)} · ${s.rows}x${s.cols}</div>`;
+      `<div class="cwd">${escapeHtml(s.cwd)}  ${s.rows}x${s.cols}</div>`;
     row.onclick = () => attach(s);
     $("list").appendChild(row);
   }
@@ -174,7 +174,7 @@ function attach(s) {
   if (!term) bootTerminal();
   term.reset();
   fit.fit();
-  $("bar").textContent = `[${s.id}] ${s.label} — ${s.cmd.join(" ")}`;
+  $("bar").textContent = `[${s.id}] ${s.label}   ${s.cmd.join(" ")}`;
   refresh();
 
   const proto = location.protocol === "https:" ? "wss" : "ws";

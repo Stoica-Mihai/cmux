@@ -44,7 +44,7 @@ pub(super) fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     left_spans.extend(vec![
-        Span::styled(" · ", dim),
+        Span::styled("  ", dim),
         Span::styled(
             pos,
             Style::default()
@@ -123,7 +123,7 @@ fn prefix_footer() -> Line<'static> {
     let mut spans = chip(" PREFIX ", theme::ACCENT_YELLOW);
     spans.push(Span::styled(
         format!(
-            "  {}=new · ↑↓=cycle · {}=detach · {}=load · {} more ",
+            "  {}=new  ↑↓=cycle  {}=detach  {}=load  {} more ",
             keys::PREFIX_SPAWN.label,
             keys::PREFIX_DETACH.label,
             keys::PREFIX_PICKER.label,
@@ -140,7 +140,7 @@ fn dashboard_footer(status: &str) -> Line<'static> {
     spans.extend(kbd_chip(keys::PREFIX.label));
     spans.push(Span::styled(
         format!(
-            "  then  {}=new · {}=load · ↑↓=cycle · 1-9=jump · {}=rename · {}=detach · {}=sidebar · {}=quit",
+            "  then  {}=new  {}=load  ↑↓=cycle  1-9=jump  {}=rename  {}=detach  {}=sidebar  {}=quit",
             keys::PREFIX_SPAWN.label,
             keys::PREFIX_PICKER.label,
             keys::PREFIX_RENAME.label,
@@ -152,7 +152,7 @@ fn dashboard_footer(status: &str) -> Line<'static> {
     ));
     if !status.is_empty() {
         spans.push(Span::styled(
-            format!("  ·  {}", status),
+            format!("  {}", status),
             Style::default().fg(theme::ACCENT_YELLOW),
         ));
     }
@@ -168,7 +168,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         Mode::Spawn(_) => (
             " SPAWN ",
             format!(
-                "  {} pick · {} cancel · {} danger · {} select · {} / {} descend/ascend",
+                "  {} pick  {} cancel  {} danger  {} select  {} / {} descend/ascend",
                 keys::SPAWN_PICK.label,
                 keys::SPAWN_CANCEL.label,
                 keys::SPAWN_TOGGLE_DANGER.label,
@@ -181,7 +181,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         Mode::Rename(_) => (
             " RENAME ",
             format!(
-                "  type new name · {} save · {} cancel",
+                "  type new name  {} save  {} cancel",
                 keys::RENAME_SAVE.label,
                 keys::RENAME_CANCEL.label,
             ),
@@ -190,7 +190,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         Mode::Picker(_) => (
             " RESUME ",
             format!(
-                "  ↑↓ select · type to filter · {} resume · {} toggle danger · {} cancel",
+                "  ↑↓ select  type to filter  {} resume  {} toggle danger  {} cancel",
                 keys::PICKER_PICK.label,
                 keys::PICKER_TOGGLE_DANGER.label,
                 keys::PICKER_CANCEL.label,
@@ -200,7 +200,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         Mode::ConfirmDetach(_) => (
             " CONFIRM ",
             format!(
-                "  {} detach · {} cancel",
+                "  {} detach  {} cancel",
                 keys::CONFIRM_YES.label,
                 keys::CONFIRM_NO.label,
             ),
@@ -214,7 +214,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
         Mode::Reorder => (
             " REORDER ",
             format!(
-                "  {} move focused session · {} exit",
+                "  {} move focused session  {} exit",
                 keys::REORDER_UP.label,
                 keys::REORDER_EXIT.label,
             ),
@@ -230,7 +230,7 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
             (
                 " SCROLLBACK ",
                 format!(
-                    "  offset={} · {} line · {} / {} page · {} top · {} bottom · {} exit",
+                    "  offset={}  {} line  {} / {} page  {} top  {} bottom  {} exit",
                     offset,
                     keys::SCROLLBACK_UP.label,
                     keys::SCROLLBACK_PAGE_UP.label,

@@ -158,18 +158,11 @@ pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
                     .and_then(|x| x.as_str())
             })
             .unwrap_or("?");
-        let label = match role {
-            "user" => "▸ user",
-            "assistant" => "◂ assistant",
-            "system" => "· system",
-            "summary" => "· summary",
-            other => other,
-        };
         let text = extract_text(&v);
         if text.trim().is_empty() {
             continue;
         }
-        out.push(format!("[{}]", label));
+        out.push(format!("[{}]", role));
         for line in text.lines().take(8) {
             out.push(format!("  {}", line));
         }

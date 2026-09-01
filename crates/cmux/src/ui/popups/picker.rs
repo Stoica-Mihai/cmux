@@ -12,7 +12,7 @@ use crate::theme;
 
 use crate::ui::popups::dangerous::draw_dangerous_panel;
 use crate::ui::widgets::{
-    collapse_cwd, pad_right, selection_strip, titled_block, truncate, viewport_window,
+    collapse_cwd, pad_right, selection_bg, titled_block, truncate, viewport_window,
 };
 
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
@@ -53,7 +53,7 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
     f.render_widget(
         Paragraph::new(Span::styled(
             format!(
-                " ↑/↓ select  ·  type to filter  ·  {} clear  ·  {} resume  ·  {} toggle danger  ·  {} cancel",
+                " ↑/↓ select  type to filter  {} clear  {} resume  {} toggle danger  {} cancel",
                 keys::PICKER_FILTER_CLEAR.label,
                 keys::PICKER_PICK.label,
                 keys::PICKER_TOGGLE_DANGER.label,
@@ -186,7 +186,7 @@ fn draw_row(
     cwd_w: usize,
 ) {
     if is_sel {
-        selection_strip(f, row_rect, theme::ACCENT_MAGENTA);
+        selection_bg(f, row_rect);
     }
 
     let text_rect = Rect {

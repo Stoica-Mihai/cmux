@@ -14,14 +14,7 @@ use crate::ui::widgets::{kbd_chip, open_popup};
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
     let w = area.width.saturating_sub(4).clamp(64, 80);
     let h = area.height.saturating_sub(2).clamp(22, 30);
-    let inner = open_popup(
-        f,
-        area,
-        w,
-        h,
-        " ⌘ cmux — cheat sheet ",
-        theme::ACCENT_YELLOW,
-    );
+    let inner = open_popup(f, area, w, h, " ⌘ cmux keys ", theme::ACCENT_YELLOW);
 
     let header = |s: &str| {
         Line::from(Span::styled(

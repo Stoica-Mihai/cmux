@@ -5,8 +5,8 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType, Borders, Clear};
 
 use crate::theme;
 
@@ -25,24 +25,14 @@ pub(super) fn viewport_window(selected: usize, total: usize, height: usize) -> (
     (start, end)
 }
 
-/// Highlight a list row: muted background + a 1-cell accent-colored bar
-/// running its full height. Works for single-row and multi-row selections
-/// (sidebar uses height=3); callers gate on their own selection predicate.
-pub(super) fn selection_strip(f: &mut Frame, row_area: Rect, accent: Color) {
-    let bg = Block::default().style(Style::default().bg(theme::BG_ACTIVE));
-    f.render_widget(bg, row_area);
-    let strip_style = Style::default().fg(accent).bg(theme::BG_ACTIVE);
-    let lines: Vec<Line> = (0..row_area.height)
-        .map(|_| Line::from(Span::styled("▎", strip_style)))
-        .collect();
+/// Highlight a list row with a muted background. Works for single-row and
+/// multi-row selections (sidebar uses height=3); callers gate on their own
+/// selection predicate. Row text is inset by 2 columns whether or not a row
+/// is selected, so highlighting never shifts anything.
+pub(super) fn selection_bg(f: &mut Frame, row_area: Rect) {
     f.render_widget(
-        Paragraph::new(lines),
-        Rect {
-            x: row_area.x,
-            y: row_area.y,
-            width: 1,
-            height: row_area.height,
-        },
+        Block::default().style(Style::default().bg(theme::BG_ACTIVE)),
+        row_area,
     );
 }
 
@@ -181,6 +171,36 @@ pub(super) fn pad_right(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// A selected row is marked by its background alone. It used to also carry
+    /// a 1-cell accent-coloured bar down its left edge; nothing should draw a
+    /// glyph there now.
+    #[test]
+    fn a_selected_row_is_background_only() {
+        let mut term = Terminal::new(TestBackend::new(8, 3)).expect("backend");
+        term.draw(|f| selection_bg(f, Rect::new(0, 0, 8, 3)))
+            .expect("draw");
+        let buf = term.backend().buffer();
+
+        for y in 0..3 {
+            for x in 0..8 {
+                let cell = &buf[(x, y)];
+                assert_eq!(
+                    cell.symbol(),
+                    " ",
+                    "cell ({x},{y}) draws {:?}; a selected row should be plain background",
+                    cell.symbol()
+                );
+                assert_eq!(
+                    cell.bg,
+                    theme::BG_ACTIVE,
+                    "cell ({x},{y}) is not the selection background"
+                );
+            }
+        }
+    }
 
     #[test]
     fn viewport_window_no_scroll() {

@@ -33,7 +33,7 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &RenameState, app: &
         Line::from(""),
         Line::from(Span::styled(
             format!(
-                "  {} save  ·  {} cancel",
+                "  {} save  {} cancel",
                 keys::RENAME_SAVE.label,
                 keys::RENAME_CANCEL.label,
             ),
