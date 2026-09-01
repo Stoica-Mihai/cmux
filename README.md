@@ -25,7 +25,8 @@ crates/
 
 ## Requirements
 
-- `claude` CLI on `PATH`.
+- `claude` CLI on `PATH` — required by the TUI, and by `cmux ctl spawn` when you
+  don't pass your own command. `cmuxd` itself has no such requirement.
 - A terminal with raw-mode + alternate-screen support (any modern terminal).
 
 ## Build / install
@@ -69,10 +70,25 @@ That's it — if no `cmuxd` is running, `cmux --connect` auto-spawns one in the 
 
 | Command | Action |
 |---|---|
-| `cmux ctl list` | Print every session the daemon is hosting |
+| `cmux ctl list` | Print every session the daemon is hosting, with its argv and grid size |
 | `cmux ctl status` | Session count summary |
+| `cmux ctl spawn <dir>` | Start a `claude` session in `<dir>` (`--dangerous`, `--label`) |
+| `cmux ctl spawn <dir> -- <cmd...>` | Start any command instead of `claude` |
 | `cmux ctl kill <id>` | Detach + kill the given session id |
 | `cmux ctl shutdown` | Stop the daemon (kills every session it owns) |
+
+`cmuxd` is command-agnostic: it execs whatever argv it is handed, so a shell,
+a REPL, or a long-running job are all valid sessions.
+
+```
+cmux ctl spawn ~/src/app -- bash -l
+cmux ctl spawn ~/src/app -- cargo watch -x test
+```
+
+Status reporting is per-session. A `claude` session gets a probe that reads
+`~/.claude/sessions/<pid>.json` and watches for permission prompts (the `⚠` in
+`ctl list`); a session started with your own command gets no probe and no
+polling.
 
 ## Selecting text
 
@@ -206,6 +222,7 @@ Delete the file to start clean.
 
 ### Daemon mode (`--connect`)
 - `cmuxd` owns every PTY, parser, and alacritty `Term` instance. Runs on a `tokio` multi-thread runtime.
+- The daemon knows nothing about `claude`. `Request::SpawnSession` carries the argv to exec plus the client's grid size, and a `ProbeKind` selecting how status is derived. `ProbeKind::Claude` installs the probe in `crates/cmuxd/src/probe.rs`; `ProbeKind::None` runs no probe and starts no polling task. Adding support for another program means adding a `StatusProbe` impl, not touching the session plumbing.
 - Communication over a UNIX socket at `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` with file mode `0o600`. Per-message framing is `u32_le length || serde_json payload`.
 - Per session inside the daemon: blocking PTY reader → fans bytes into `tokio::sync::broadcast::Sender<Vec<u8>>` so every attached client gets the same byte stream as a `FrameDelta` event.
 - `cmux --connect` runs the same TUI / renderer / mouse selection / OSC 52 path as local mode. The only difference is per-Session backend: `Session::Backend::Daemon` routes `write()` / `resize()` / `kill()` / `detach_keep()` to `Request::Input` / `Request::Resize` / `Request::Detach`.
