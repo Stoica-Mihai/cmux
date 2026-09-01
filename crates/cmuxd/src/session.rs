@@ -388,6 +388,23 @@ impl Session {
         Ok(())
     }
 
+    /// What a newly attached client needs in order to arrive at the current
+    /// picture. A full-screen program gets a rendered snapshot, because
+    /// replaying its raw output re-executes stale drawing commands and lands
+    /// as garbage. Anything else gets the ring, so shell history survives,
+    /// followed by a repaint so the visible screen is authoritative.
+    pub fn attach_payload(&self) -> Vec<u8> {
+        let Ok(t) = self.term_state.lock() else {
+            return self.ring_snapshot();
+        };
+        if crate::snapshot::is_alt_screen(&t.term) {
+            return crate::snapshot::render(&t.term);
+        }
+        let mut out = self.ring_snapshot();
+        out.extend_from_slice(&crate::snapshot::render(&t.term));
+        out
+    }
+
     pub fn ring_snapshot(&self) -> Vec<u8> {
         self.byte_ring
             .lock()
@@ -569,6 +586,84 @@ mod tests {
         );
         assert_eq!(sess.info().label, "mine");
         sess.kill();
+    }
+
+    /// Attach, replay what the daemon hands a new client into a fresh
+    /// terminal, and require the same grid *and* the same screen buffer.
+    ///
+    /// The fixture deliberately overflows the 1 MiB ring. A complete ring
+    /// replays correctly, so the bug only shows once the front has been
+    /// dropped and the replay starts mid-stream, missing the alt-screen
+    /// switch that framed everything after it. That is the state any
+    /// long-running full-screen program reaches.
+    fn assert_attach_reproduces_the_session(script: &str, expect_alt: bool) {
+        let (rows, cols) = (10u16, 40u16);
+        let sess = Session::spawn(
+            1,
+            "t".into(),
+            PathBuf::from("/tmp"),
+            vec!["/bin/sh".into(), "-c".into(), script.into()],
+            ProbeKind::None,
+            rows,
+            cols,
+        )
+        .expect("spawn");
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        let payload = sess.attach_payload();
+        let live = sess.term_state.lock().expect("term");
+        assert_eq!(
+            crate::snapshot::is_alt_screen(&live.term),
+            expect_alt,
+            "the fixture did not put the session where the test expects"
+        );
+
+        let size = TermSize {
+            lines: rows as usize,
+            cols: cols as usize,
+        };
+        let mut fresh = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut proc: Processor = Processor::new();
+        proc.advance(&mut fresh, &payload);
+
+        assert_eq!(
+            crate::snapshot::is_alt_screen(&fresh),
+            crate::snapshot::is_alt_screen(&live.term),
+            "the attaching client ended up in the other screen buffer"
+        );
+        for row in 0..rows as usize {
+            let line = alacritty_terminal::index::Line(row as i32);
+            for col in 0..cols as usize {
+                let a = &live.term.grid()[line][alacritty_terminal::index::Column(col)];
+                let b = &fresh.grid()[line][alacritty_terminal::index::Column(col)];
+                assert_eq!(
+                    (a.c, a.fg, a.bg, a.flags),
+                    (b.c, b.fg, b.bg, b.flags),
+                    "cell ({row},{col}) differs; an attaching client sees something else"
+                );
+            }
+        }
+        drop(live);
+        sess.kill();
+    }
+
+    #[test]
+    fn attaching_reproduces_a_long_running_full_screen_program() {
+        assert_attach_reproduces_the_session(
+            "printf '\\033[?1049h\\033[2J\\033[H'; \
+             head -c 1400000 /dev/zero | tr '\\0' 'x'; \
+             printf '\\033[2J\\033[HFINAL\\r\\n\\033[7mROW2\\033[0m'; sleep 5",
+            true,
+        );
+    }
+
+    #[test]
+    fn attaching_reproduces_a_program_that_repaints_in_place() {
+        assert_attach_reproduces_the_session(
+            "printf 'old frame\\r\\n'; \
+             printf '\\033[2J\\033[H\\033[32mnew frame\\033[0m\\r\\n'; sleep 5",
+            false,
+        );
     }
 
     #[test]

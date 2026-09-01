@@ -14,9 +14,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped to 2 when `SpawnSession` became command-generic. A v1 client is
-/// rejected at the handshake rather than left to fail on a decode.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 2 made `SpawnSession` command-generic; 3 dropped the `Snapshot` event,
+/// which was always sent empty and never read. A stale client is rejected at
+/// the handshake rather than left to fail on a decode.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Environment variables exported by outer terminals that misadvertise the
 /// host capabilities to the child. cmux IS the terminal the child sees; strip
@@ -241,13 +242,6 @@ pub enum Event {
         id: u64,
         status: String,
     },
-    /// `term_bytes` carries an opaque snapshot blob (postcard-encoded alacritty
-    /// `Term`). The client deserializes via the same crate version.
-    Snapshot {
-        id: u64,
-        term_bytes: Vec<u8>,
-        size: (u16, u16),
-    },
     FrameDelta {
         id: u64,
         bytes: Vec<u8>,
@@ -401,15 +395,6 @@ mod tests {
         round_trip(Event::FrameDelta {
             id: 1,
             bytes: vec![1, 2, 3, 4, 5],
-        });
-    }
-
-    #[test]
-    fn event_snapshot() {
-        round_trip(Event::Snapshot {
-            id: 1,
-            term_bytes: vec![0u8; 1024],
-            size: (24, 80),
         });
     }
 

@@ -6,6 +6,7 @@
 mod http;
 mod probe;
 mod session;
+mod snapshot;
 
 use std::collections::HashMap;
 use std::fs;
@@ -517,23 +518,12 @@ async fn dispatch(
             let Some(sess) = registry.get(session_id).await else {
                 anyhow::bail!("no such session {session_id}");
             };
-            // Phase 3 MVP: send empty snapshot (TUI builds fresh Term) and a
-            // FrameDelta carrying the full ring so the client reconstructs
-            // current state.
-            let (rows, cols) = *sess.size.lock().map_err(|_| anyhow::anyhow!("poison"))?;
-            let _ = event_tx
-                .send(Event::Snapshot {
-                    id: session_id,
-                    term_bytes: Vec::new(),
-                    size: (rows, cols),
-                })
-                .await;
-            let ring = sess.ring_snapshot();
-            if !ring.is_empty() {
+            let payload = sess.attach_payload();
+            if !payload.is_empty() {
                 let _ = event_tx
                     .send(Event::FrameDelta {
                         id: session_id,
-                        bytes: ring,
+                        bytes: payload,
                     })
                     .await;
             }

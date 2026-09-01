@@ -334,8 +334,8 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     let client = registry.alloc_client_id();
     let mut rx = sess.bytes_tx.subscribe();
 
-    let ring = sess.ring_snapshot();
-    if !ring.is_empty() && socket.send(Message::Binary(ring.into())).await.is_err() {
+    let opening = sess.attach_payload();
+    if !opening.is_empty() && socket.send(Message::Binary(opening.into())).await.is_err() {
         return;
     }
 
@@ -356,8 +356,8 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
                 // Fell behind the broadcast queue: repaint rather than
                 // deliver a stream with a hole in it.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let ring = sess.ring_snapshot();
-                    if socket.send(Message::Binary(ring.into())).await.is_err() {
+                    let repaint = sess.attach_payload();
+                    if socket.send(Message::Binary(repaint.into())).await.is_err() {
                         break;
                     }
                 }
