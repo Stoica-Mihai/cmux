@@ -140,11 +140,11 @@ async function refresh() {
     sessions = await r.json();
   } catch { return; }
 
-  // The pty runs at the smallest size among everyone attached, which may be
-  // shorter than this window. Render at that size — otherwise the rows past
-  // it are never redrawn and keep whatever was on screen before.
+  // Fallback only: the socket pushes the size in-band. This catches a
+  // session resized while this tab was not attached to it.
   const mine = sessions.find(s => s.id === current);
-  if (mine && term && (term.rows !== mine.rows || term.cols !== mine.cols)) {
+  if (mine && term && (!ws || ws.readyState !== 1)
+      && (term.rows !== mine.rows || term.cols !== mine.cols)) {
     term.resize(mine.cols, mine.rows);
   }
 
@@ -190,8 +190,15 @@ function attach(s) {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { fit.fit(); pushSize(); term.focus(); };
   ws.onmessage = (e) => {
-    if (typeof e.data === "string") term.write(e.data);
-    else term.write(new Uint8Array(e.data));
+    // Binary is pty output; text is control. The daemon sends the new size
+    // before the output drawn at it, so resizing here happens first and the
+    // redraw lands in a grid of the right width.
+    if (typeof e.data !== "string") { term.write(new Uint8Array(e.data)); return; }
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { term.write(e.data); return; }
+    if (msg.type === "size" && msg.rows > 0 && msg.cols > 0) {
+      if (term.rows !== msg.rows || term.cols !== msg.cols) term.resize(msg.cols, msg.rows);
+    }
   };
   ws.onclose = () => term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
 }

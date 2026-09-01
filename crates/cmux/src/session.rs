@@ -546,6 +546,15 @@ impl Session {
         if let Ok(mut p) = self.parser.lock() {
             p.resize(rows, cols);
         }
+        // Ask for a repaint at the new size. The program may have already
+        // drawn before this client knew, or may not redraw at all, and either
+        // way the grid that was just resized holds reflowed leftovers.
+        if let Backend::Daemon { remote_id, req_tx } = &self.backend {
+            let _ = req_tx.send(ProtoRequest::Attach {
+                session_id: *remote_id,
+                want_history: false,
+            });
+        }
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -696,6 +705,13 @@ mod tests {
 
         sess.apply_effective_size(26, 84);
         assert_eq!(grid(&sess), (26, 84));
+
+        // …and asks the daemon to repaint, because the grid it just resized
+        // holds reflowed leftovers of the old width.
+        match rx.try_recv().expect("a repaint should have been requested") {
+            ProtoRequest::Attach { session_id, .. } => assert_eq!(session_id, 9),
+            other => panic!("expected Attach, got {other:?}"),
+        }
     }
 
     #[test]

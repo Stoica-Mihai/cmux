@@ -295,6 +295,11 @@ async fn ws_session(
 ///
 ///   `0` + bytes  input, passed to the pty verbatim
 ///   `1` + JSON   this client's grid size, `{"rows":R,"cols":C}`
+///
+/// Server → client, binary frames are pty output and text frames are JSON
+/// control. The split matters for ordering: when the pty changes size the
+/// control frame arrives before the output drawn at the new size, so the
+/// client has already resized its grid by the time it has to render it.
 fn on_client_message(sess: &crate::session::Session, client: u64, msg: &[u8]) {
     let Some((&cmd, rest)) = msg.split_first() else {
         return;
@@ -333,6 +338,15 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     // as long as it stays attached.
     let client = registry.alloc_client_id();
     let mut rx = sess.bytes_tx.subscribe();
+    let mut info_rx = sess.info_rx.clone();
+
+    let mut last_size = {
+        let i = info_rx.borrow();
+        (i.rows, i.cols)
+    };
+    if send_size(&mut socket, last_size).await.is_err() {
+        return;
+    }
 
     let opening = sess.attach_payload();
     if !opening.is_empty() && socket.send(Message::Binary(opening.into())).await.is_err() {
@@ -363,10 +377,37 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            changed = info_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let now = {
+                    let i = info_rx.borrow();
+                    (i.rows, i.cols)
+                };
+                if now != last_size {
+                    last_size = now;
+                    // Size first, then a repaint at that size. A client that
+                    // learned the new size only on its next poll would render
+                    // the program's redraw into the old grid and wrap it.
+                    if send_size(&mut socket, now).await.is_err() {
+                        break;
+                    }
+                    let repaint = sess.attach_payload();
+                    if socket.send(Message::Binary(repaint.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
         }
     }
     // Tab closed: stop holding the grid down to this client's size.
     sess.drop_client(client);
+}
+
+async fn send_size(socket: &mut WebSocket, (rows, cols): (u16, u16)) -> Result<(), ()> {
+    let msg = format!(r#"{{"type":"size","rows":{rows},"cols":{cols}}}"#);
+    socket.send(Message::Text(msg.into())).await.map_err(|_| ())
 }
 
 #[cfg(test)]
