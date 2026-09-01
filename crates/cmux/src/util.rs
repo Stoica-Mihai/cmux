@@ -1,19 +1,6 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn prefix_hint() -> String {
-    use crate::keys;
-    format!(
-        "{} then {}/{}/↑↓/{}/{}/{}",
-        keys::PREFIX.label,
-        keys::PREFIX_SPAWN.label,
-        keys::PREFIX_PICKER.label,
-        keys::PREFIX_DETACH.label,
-        keys::PREFIX_TOGGLE_SIDEBAR.label,
-        keys::PREFIX_QUIT.label,
-    )
-}
-
 /// Format an elapsed-seconds count as a compact `s/m/h/d` cell. Caller picks
 /// the suffix — `" ago"` reads naturally on a timestamp column, `""` on a
 /// sidebar status line.

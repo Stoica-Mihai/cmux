@@ -293,4 +293,15 @@ mod tests {
         assert!(with_status.contains("spawned session [2]"));
         assert!(with_status.chars().count() > plain.chars().count());
     }
+
+    /// The row said "Ctrl+A" twice: once as its own hint, once inside a status
+    /// message that carried a second copy of the chord list.
+    #[test]
+    fn the_prefix_is_named_once_even_with_a_status() {
+        for status in ["", "spawned session [2]", "resumed session [7]"] {
+            let line = text(&dashboard_footer(status));
+            let named = line.matches(keys::PREFIX.label).count();
+            assert_eq!(named, 1, "the prefix is named {named} times: {line}");
+        }
+    }
 }
