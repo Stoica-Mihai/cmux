@@ -880,12 +880,13 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
             app.mode = Mode::Dashboard;
             match app.spawn_resume(cwd, dangerous, session_id) {
                 Ok(()) => {
-                    app.status = format!("resumed session [{}]", app.sessions.len());
+                    // The new row in the sidebar says this already.
+                    app.status.clear();
                     resize_all(app);
                     app.persist_dirty = true;
                 }
                 Err(e) => {
-                    app.status = format!("resume failed: {}", e);
+                    app.status = format!("resume failed: {e:#}");
                 }
             }
         } else {
@@ -935,12 +936,13 @@ fn handle_spawn(app: &mut App, mut state: SpawnState, key: KeyEvent) -> Result<(
         app.mode = Mode::Dashboard;
         match app.spawn_session(chosen, dangerous) {
             Ok(()) => {
-                app.status = format!("spawned session [{}]", app.sessions.len());
+                // The new row in the sidebar says this already.
+                app.status.clear();
                 resize_all(app);
                 app.persist_dirty = true;
             }
             Err(e) => {
-                app.status = format!("spawn failed: {}", e);
+                app.status = format!("spawn failed: {e:#}");
             }
         }
     } else if keys::SPAWN_TOGGLE_DANGER.matches(&key) {
