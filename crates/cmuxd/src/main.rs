@@ -24,6 +24,42 @@ use crate::session::Session;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+const USAGE: &str = "\
+cmuxd — the cmux session daemon
+
+Usage: cmuxd
+
+Takes no options. Listens on $XDG_RUNTIME_DIR/cmux/cmuxd.sock (fallback
+/tmp/cmux-<uid>/<home>/cmux) and hosts one PTY per session. Drive it with
+`cmux --connect` or `cmux ctl`.
+
+  -h, --help     print this message
+  -V, --version  print the version
+
+Environment:
+  CMUXD_LOG      tracing filter, e.g. `debug` or `cmuxd=trace,info`";
+
+/// What the daemon should do about its argv.
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    Run,
+    Print(String),
+    Reject(String),
+}
+
+/// `cmuxd` accepts no options, but it used to ignore argv entirely — so
+/// `cmuxd --help` silently started a daemon and blocked.
+fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Cli {
+    match args.into_iter().next() {
+        None => Cli::Run,
+        Some(arg) => match arg.as_str() {
+            "-h" | "--help" => Cli::Print(USAGE.to_string()),
+            "-V" | "--version" => Cli::Print(format!("cmuxd {SERVER_VERSION}")),
+            other => Cli::Reject(format!("cmuxd: unexpected argument `{other}`")),
+        },
+    }
+}
+
 fn log_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -141,6 +177,18 @@ impl Registry {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    match parse_cli(std::env::args().skip(1)) {
+        Cli::Run => {}
+        Cli::Print(text) => {
+            println!("{text}");
+            return Ok(());
+        }
+        Cli::Reject(msg) => {
+            eprintln!("{msg}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+
     let _log_guard = init_logging();
     if let Some((_, ref p)) = _log_guard {
         tracing::info!(dir = %p.display(), "log rotation -> daily");
@@ -633,6 +681,36 @@ mod tests {
 
         for s in registry.sessions.lock().await.values() {
             s.kill();
+        }
+    }
+
+    #[test]
+    fn bare_cmuxd_runs_the_daemon() {
+        assert_eq!(parse_cli(Vec::<String>::new()), Cli::Run);
+    }
+
+    /// The bug this guards: argv was ignored, so `cmuxd --help` started a
+    /// daemon and blocked instead of printing anything.
+    #[test]
+    fn help_and_version_print_instead_of_daemonizing() {
+        let help = parse_cli(vec!["--help".to_string()]);
+        assert!(
+            matches!(help, Cli::Print(ref t) if t.contains("Usage: cmuxd")),
+            "{help:?}"
+        );
+        assert_eq!(parse_cli(vec!["-h".to_string()]), help);
+
+        match parse_cli(vec!["--version".to_string()]) {
+            Cli::Print(t) => assert_eq!(t, format!("cmuxd {SERVER_VERSION}")),
+            other => panic!("expected a version line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_argument_is_rejected_not_ignored() {
+        match parse_cli(vec!["--nope".to_string()]) {
+            Cli::Reject(msg) => assert!(msg.contains("--nope"), "{msg}"),
+            other => panic!("expected a rejection, got {other:?}"),
         }
     }
 

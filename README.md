@@ -29,22 +29,55 @@ crates/
   don't pass your own command. `cmuxd` itself has no such requirement.
 - A terminal with raw-mode + alternate-screen support (any modern terminal).
 
-## Build / install
+## Install
 
 ```
-# both binaries, release
+make install
+```
+
+Builds in release, then installs `cmux` and `cmuxd` into `$CARGO_HOME/bin`
+(usually `~/.cargo/bin`) — make sure that directory is on your `PATH`.
+`make uninstall` removes them again.
+
+Both binaries matter: `cmux --connect` auto-spawns `cmuxd`, looking next to its
+own executable first and then on `PATH`.
+
+Note that `cargo install --path .` does **not** work from the workspace root —
+that manifest is virtual, with no package of its own — so each binary crate is
+installed by its own path:
+
+```
+cargo install --path crates/cmux  --locked
+cargo install --path crates/cmuxd --locked
+```
+
+### Make targets
+
+| Target | Action |
+|---|---|
+| `make build` | release binaries into `target/release` |
+| `make install` | `build`, then install both binaries |
+| `make uninstall` | remove both binaries |
+| `make test` | `cargo test --workspace` |
+| `make check` | everything CI runs: fmt, clippy, build, test |
+| `make smoke` | end-to-end test against a real daemon |
+| `make demo` | rendered walkthrough of the TUI |
+| `make clean` | `cargo clean` |
+
+## Run from a checkout
+
+```
 cargo build --release --workspace
 
-# from workspace root
-target/release/cmux           # TUI (local mode)
-target/release/cmuxd          # daemon
+target/release/cmux              # TUI (local mode)
+target/release/cmuxd             # daemon
 ```
 
-Or with cargo:
+Or without building first:
 
 ```
-cargo run -p cmux             # TUI
-cargo run -p cmuxd            # daemon
+cargo run -p cmux                # TUI
+cargo run -p cmuxd               # daemon
 cargo run -p cmux -- --connect   # TUI in daemon-backed mode
 cargo run -p cmux -- ctl list    # admin CLI
 ```
