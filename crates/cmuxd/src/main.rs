@@ -117,9 +117,13 @@ impl Registry {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Sorted by id. Clients number sessions by their position here, so
+    /// HashMap iteration order would renumber every session on reconnect.
     async fn list(&self) -> Vec<cmux_proto::SessionInfo> {
         let sessions = self.sessions.lock().await;
-        sessions.values().map(|s| s.info()).collect()
+        let mut out: Vec<cmux_proto::SessionInfo> = sessions.values().map(|s| s.info()).collect();
+        out.sort_by_key(|s| s.id);
+        out
     }
 
     async fn insert(&self, sess: Arc<Session>) {
@@ -321,7 +325,10 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
                         let _ = event_tx
                             .send(Event::Error {
                                 request_id: None,
-                                message: format!("{e}"),
+                                // `{e:#}` walks the anyhow source chain; plain
+                                // `{e}` reports only the outermost context, so
+                                // a failed exec came back as "Session::spawn".
+                                message: format!("{e:#}"),
                             })
                             .await;
                     }
@@ -601,6 +608,33 @@ fn framing_io(e: std::io::Error) -> FrameError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Insert out of id order; `list` must still come back ascending. With a
+    /// HashMap the insertion order is not the iteration order, so this fails
+    /// if the sort is removed.
+    #[tokio::test]
+    async fn list_is_ordered_by_session_id() {
+        let registry = Registry::new();
+        for id in [4u64, 1, 5, 3, 2] {
+            let sess = Session::spawn(
+                id,
+                format!("s{id}"),
+                PathBuf::from("/tmp"),
+                vec!["/bin/sleep".into(), "30".into()],
+                cmux_proto::ProbeKind::None,
+                24,
+                80,
+            )
+            .expect("spawn /bin/sleep");
+            registry.insert(sess).await;
+        }
+        let ids: Vec<u64> = registry.list().await.into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+
+        for s in registry.sessions.lock().await.values() {
+            s.kill();
+        }
+    }
 
     #[test]
     fn fallback_socket_dir_nests_home_under_the_uid_dir() {
