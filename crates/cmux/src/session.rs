@@ -161,6 +161,8 @@ pub struct PendingStatus {
     pub status: SessionStatus,
     pub label: Option<String>,
     pub attention: bool,
+    pub rows: u16,
+    pub cols: u16,
 }
 
 enum Backend {
@@ -398,10 +400,14 @@ impl Session {
         // Daemon mode: drain pending StatusUpdate(s) emitted by the events
         // reader thread. Skip the local PID-file lookup since the claude
         // process isn't ours.
-        if let Some(slot) = self.daemon_pending_status.as_ref() {
-            if let Ok(mut ps) = slot.lock()
-                && let Some(p) = ps.take()
-            {
+        if self.daemon_pending_status.is_some() {
+            // Take it out before touching `self`, so the slot's borrow is done
+            // by the time the grid is resized.
+            let pending = self
+                .daemon_pending_status
+                .as_ref()
+                .and_then(|slot| slot.lock().ok().and_then(|mut ps| ps.take()));
+            if let Some(p) = pending {
                 if self.status != p.status {
                     self.status = p.status;
                 }
@@ -415,6 +421,7 @@ impl Session {
                     self.claude_name = Some(n);
                 }
                 self.attention = p.attention;
+                self.apply_effective_size(p.rows, p.cols);
             }
             return;
         }
@@ -501,11 +508,15 @@ impl Session {
                 master.resize(pty_size(rows, cols)).context("resize pty")?;
             }
             Backend::Daemon { remote_id, req_tx } => {
+                // Only a request. The pty runs at the smallest size among all
+                // attached clients, and the grid is resized when the daemon
+                // reports back what that turned out to be.
                 let _ = req_tx.send(ProtoRequest::Resize {
                     session_id: *remote_id,
                     rows,
                     cols,
                 });
+                return Ok(());
             }
         }
         if let Ok(mut p) = self.parser.lock() {
@@ -513,6 +524,29 @@ impl Session {
         }
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Adopt the size the pty is actually running at. Rendering a grid taller
+    /// than the pty leaves the rows past its height showing whatever was drawn
+    /// there before the shrink.
+    pub fn apply_effective_size(&mut self, rows: u16, cols: u16) {
+        use alacritty_terminal::grid::Dimensions;
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let current = self.parser.lock().ok().map(|p| {
+            (
+                p.term.grid().screen_lines() as u16,
+                p.term.grid().columns() as u16,
+            )
+        });
+        if current == Some((rows, cols)) {
+            return;
+        }
+        if let Ok(mut p) = self.parser.lock() {
+            p.resize(rows, cols);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     pub fn is_alive(&mut self) -> bool {
@@ -628,6 +662,40 @@ mod tests {
             }
             other => panic!("expected Detach, got {other:?}"),
         }
+    }
+
+    /// A client asks for a size; the pty runs at the smallest asked for by
+    /// anyone. Rendering at the requested size instead leaves every row past
+    /// the pty's height showing output from before the shrink.
+    #[test]
+    fn a_daemon_session_renders_at_the_effective_size_not_the_requested_one() {
+        use alacritty_terminal::grid::Dimensions;
+        let (mut sess, rx) = daemon_session(9);
+        let grid = |s: &Session| {
+            let p = s.parser.lock().expect("parser");
+            (
+                p.term.grid().screen_lines() as u16,
+                p.term.grid().columns() as u16,
+            )
+        };
+        assert_eq!(grid(&sess), (24, 80));
+
+        sess.resize(40, 120).expect("resize");
+        assert_eq!(
+            grid(&sess),
+            (24, 80),
+            "the grid followed this client's request instead of the pty"
+        );
+        match rx
+            .try_recv()
+            .expect("the request should still reach the daemon")
+        {
+            ProtoRequest::Resize { rows, cols, .. } => assert_eq!((rows, cols), (40, 120)),
+            other => panic!("expected Resize, got {other:?}"),
+        }
+
+        sess.apply_effective_size(26, 84);
+        assert_eq!(grid(&sess), (26, 84));
     }
 
     #[test]

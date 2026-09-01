@@ -15,9 +15,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// 2 made `SpawnSession` command-generic; 3 dropped the `Snapshot` event,
-/// which was always sent empty and never read. A stale client is rejected at
-/// the handshake rather than left to fail on a decode.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// which was always sent empty and never read; 4 put the effective grid size
+/// on `StatusUpdate`, so a client renders at the size the pty actually runs
+/// at rather than the one it asked for. A stale client is rejected at the
+/// handshake rather than left to fail on a decode.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Environment variables exported by outer terminals that misadvertise the
 /// host capabilities to the child. cmux IS the terminal the child sees; strip
@@ -251,6 +253,11 @@ pub enum Event {
         status: SessionStatus,
         label: Option<String>,
         attention: bool,
+        /// The size the pty is actually running at, which is the minimum over
+        /// every attached client. A client that renders at its own requested
+        /// size instead leaves the rows beyond this one holding stale output.
+        rows: u16,
+        cols: u16,
     },
     /// Daemon → client: replay your snapshot, you lagged.
     Resync {

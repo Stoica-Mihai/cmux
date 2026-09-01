@@ -241,6 +241,8 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
                         status,
                         label,
                         attention,
+                        rows,
+                        cols,
                     } => {
                         if let Ok(m) = slots_for_reader.lock()
                             && let Some(slot) = m.get(&id)
@@ -250,6 +252,8 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
                                 status,
                                 label,
                                 attention,
+                                rows,
+                                cols,
                             });
                             slot.dirty.store(true, Ordering::Relaxed);
                         }

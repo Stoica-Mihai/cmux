@@ -354,7 +354,15 @@ impl Session {
             clients,
             "pty size (minimum across attached clients)"
         );
-        self.resize(rows, cols)
+        let changed = self.resize(rows, cols);
+        // Tell attached clients what the pty actually runs at. Without this a
+        // client keeps rendering at the size it asked for, and the rows past
+        // the effective height keep whatever was drawn there before.
+        if changed.is_ok() {
+            let info = self.info();
+            let _ = self.info_tx.send(info);
+        }
+        changed
     }
 
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {

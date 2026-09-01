@@ -571,6 +571,8 @@ async fn dispatch(
                         status: info.status,
                         label: Some(info.label),
                         attention: info.attention,
+                        rows: info.rows,
+                        cols: info.cols,
                     })
                     .await;
             }
@@ -625,6 +627,8 @@ async fn dispatch(
                         status: info.status,
                         label: Some(info.label),
                         attention: info.attention,
+                        rows: info.rows,
+                        cols: info.cols,
                     })
                     .await;
                 while info_rx.changed().await.is_ok() {
@@ -635,6 +639,8 @@ async fn dispatch(
                             status: info.status,
                             label: Some(info.label),
                             attention: info.attention,
+                            rows: info.rows,
+                            cols: info.cols,
                         })
                         .await
                         .is_err()

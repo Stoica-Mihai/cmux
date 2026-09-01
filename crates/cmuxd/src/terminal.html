@@ -140,6 +140,14 @@ async function refresh() {
     sessions = await r.json();
   } catch { return; }
 
+  // The pty runs at the smallest size among everyone attached, which may be
+  // shorter than this window. Render at that size — otherwise the rows past
+  // it are never redrawn and keep whatever was on screen before.
+  const mine = sessions.find(s => s.id === current);
+  if (mine && term && (term.rows !== mine.rows || term.cols !== mine.cols)) {
+    term.resize(mine.cols, mine.rows);
+  }
+
   $("count").textContent = sessions.length + (sessions.length === 1 ? " session" : " sessions");
   $("list").innerHTML = "";
   for (const s of sessions) {
