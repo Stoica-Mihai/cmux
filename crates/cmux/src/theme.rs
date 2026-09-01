@@ -32,8 +32,9 @@ pub fn spinner_frame(tick: u64) -> char {
 /// them as named consts means the legend in `popups::help` and the row
 /// renderer in `dashboard` agree by reference, not by coincidence.
 pub mod glyph {
+    /// Also stands in for dormant, dimmed rather than swapped for another
+    /// glyph — the state differs in degree, not in kind.
     pub const IDLE: &str = "○";
-    pub const DORMANT: &str = "·";
     pub const EXITED: &str = "✕";
     pub const RESUMED: &str = "↺";
     /// Permission prompt waiting on user (claude blocked).

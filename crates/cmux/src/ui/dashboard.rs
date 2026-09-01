@@ -220,7 +220,9 @@ fn sidebar_badge(s: &Session, alive: bool, age_ms: u64, render_tick: u64) -> (St
     if age_ms < 30_000 {
         return (theme::glyph::IDLE.into(), theme::ACCENT_YELLOW);
     }
-    (theme::glyph::DORMANT.into(), theme::FG_DIM)
+    // Dormant: the idle glyph, dimmed. Keeps the badge column filled so rows
+    // do not shift, and reads as "idle, for longer".
+    (theme::glyph::IDLE.into(), theme::FG_DIM)
 }
 
 fn sidebar_meta(s: &Session, age_ms: u64, max_width: usize) -> String {
@@ -343,4 +345,68 @@ fn tile_title(session: &Session, alive: bool, zoomed: bool, display_num: usize) 
         " {}[{}]{}{}{} ",
         zoom_marker, display_num, danger, session.label, state
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    fn session() -> Session {
+        let (tx, _rx) = mpsc::channel();
+        Session::new_daemon(
+            1,
+            "s".into(),
+            PathBuf::from("/tmp"),
+            false,
+            None,
+            24,
+            80,
+            None,
+            1,
+            tx,
+        )
+        .0
+    }
+
+    /// No badge state renders a bare dot. It read as decoration next to the
+    /// other glyphs rather than as a status.
+    #[test]
+    fn no_badge_state_is_a_bare_dot() {
+        let mut s = session();
+        let states = [
+            (false, false, SessionStatus::Unknown, 0u64),
+            (true, true, SessionStatus::Unknown, 0),
+            (true, false, SessionStatus::Busy, 0),
+            (true, false, SessionStatus::Idle, 60_000),
+            (true, false, SessionStatus::Unknown, 10_000),
+            (true, false, SessionStatus::Unknown, 60_000),
+        ];
+        for (alive, attention, status, age) in states {
+            s.attention = attention;
+            s.status = status;
+            let (glyph, _) = sidebar_badge(&s, alive, age, 0);
+            assert_ne!(glyph, "·", "a badge still renders a bare dot: {glyph:?}");
+        }
+    }
+
+    /// Dormant is the idle glyph dimmed, not a different shape — but it still
+    /// has to be tellable apart, so the colour must differ.
+    #[test]
+    fn dormant_is_the_idle_glyph_in_a_dimmer_colour() {
+        let mut s = session();
+        s.attention = false;
+        s.status = SessionStatus::Unknown;
+
+        let (recent, recent_color) = sidebar_badge(&s, true, 10_000, 0);
+        let (dormant, dormant_color) = sidebar_badge(&s, true, 60_000, 0);
+
+        assert_eq!(recent, theme::glyph::IDLE);
+        assert_eq!(dormant, theme::glyph::IDLE);
+        assert_ne!(
+            recent_color, dormant_color,
+            "dormant and recent render the same, so the state is invisible"
+        );
+    }
 }

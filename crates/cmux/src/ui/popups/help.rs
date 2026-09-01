@@ -84,7 +84,10 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
             "{} red    permission prompt waiting",
             theme::glyph::PERMISSION
         )),
-        note(&format!("{} gray   dormant", theme::glyph::DORMANT)),
+        note(&format!(
+            "{} gray   dormant (idle over 30s)",
+            theme::glyph::IDLE
+        )),
         note(&format!("{} red    session exited", theme::glyph::EXITED)),
         note(&format!("{} cyan   resumed session", theme::glyph::RESUMED)),
         Line::from(""),
