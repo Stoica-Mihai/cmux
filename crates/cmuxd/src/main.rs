@@ -59,13 +59,18 @@ fn socket_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|h| {
-                let uid = nix_compat_uid();
-                PathBuf::from(format!("/tmp/cmux-{}", uid)).join(h.to_string_lossy().to_string())
-            })
+            std::env::var_os("HOME")
+                .map(|h| fallback_socket_dir(nix_compat_uid(), &h.to_string_lossy()))
         })
         .context("no XDG_RUNTIME_DIR or HOME")?;
     Ok(base.join("cmux"))
+}
+
+/// Per-uid scratch dir for hosts with no `XDG_RUNTIME_DIR`, notably WSL
+/// without `systemd=true`. `HOME` is absolute, and `PathBuf::join` discards
+/// the base when handed an absolute path, so the leading slash must go.
+fn fallback_socket_dir(uid: u32, home: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/cmux-{}", uid)).join(home.trim_start_matches('/'))
 }
 
 fn nix_compat_uid() -> u32 {
@@ -580,5 +585,22 @@ fn framing_io(e: std::io::Error) -> FrameError {
         FrameError::Eof
     } else {
         FrameError::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_socket_dir_nests_home_under_the_uid_dir() {
+        assert_eq!(
+            fallback_socket_dir(1000, "/home/mcs"),
+            PathBuf::from("/tmp/cmux-1000/home/mcs")
+        );
+        assert_eq!(
+            fallback_socket_dir(0, "/root"),
+            PathBuf::from("/tmp/cmux-0/root")
+        );
     }
 }
