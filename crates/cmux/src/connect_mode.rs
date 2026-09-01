@@ -29,7 +29,7 @@ const RING_CAP: usize = 1_048_576;
 /// Spawn `cmuxd` in the background and wait up to ~2 s for its socket to
 /// appear. Tries the binary next to the current `cmux` first, then `cmuxd`
 /// on `$PATH`.
-fn try_spawn_daemon() -> Result<()> {
+fn try_spawn_daemon(http: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -43,7 +43,11 @@ fn try_spawn_daemon() -> Result<()> {
 
     let mut launched = false;
     for cand in candidates {
-        match Command::new(&cand)
+        let mut command = Command::new(&cand);
+        if let Some(addr) = http {
+            command.arg("--http").arg(addr);
+        }
+        match command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -131,11 +135,13 @@ impl DaemonHandle {
 /// Connect, run the Hello/Welcome handshake, list existing sessions, and
 /// return `(DaemonHandle, initial_session_infos)`. The handle's reader thread
 /// is already running; the writer thread drains `req_tx` into the socket.
-pub fn connect(path: &Path) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
+pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Vec<SessionInfo>)> {
+    // `http` only reaches a daemon this call starts. One already running keeps
+    // whatever it was launched with.
     let mut client = match Client::connect(path) {
         Ok(c) => c,
         Err(_) => {
-            try_spawn_daemon()?;
+            try_spawn_daemon(http)?;
             Client::connect(path).context("connect cmuxd after auto-spawn")?
         }
     };

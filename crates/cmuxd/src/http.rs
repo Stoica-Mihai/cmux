@@ -220,6 +220,9 @@ struct ResizeBody {
     cols: u16,
 }
 
+/// Sets the size used while nothing is attached. A one-shot HTTP call has no
+/// attachment to speak for, so it cannot join the minimum that governs when
+/// clients are connected — saying so beats silently doing nothing.
 async fn resize(
     State(registry): State<Arc<Registry>>,
     Path(id): Path<u64>,
@@ -228,7 +231,19 @@ async fn resize(
     let Some(sess) = registry.get(id).await else {
         return no_such_session(id);
     };
-    match sess.resize(body.rows.max(1), body.cols.max(1)) {
+    let attached = sess.attached_clients();
+    if attached > 0 {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "{attached} client(s) attached; the pty runs at the smallest of their sizes. \
+                 Resize from the attached client instead — over the WebSocket, send \
+                 `1{{\"rows\":R,\"cols\":C}}`.\n"
+            ),
+        )
+            .into_response();
+    }
+    match sess.set_baseline_size(body.rows.max(1), body.cols.max(1)) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
     }
@@ -246,6 +261,37 @@ async fn ws_session(
     ws.on_upgrade(move |socket| pump(socket, id, registry))
 }
 
+/// Client → server messages carry a leading command byte, so a resize is not
+/// mistaken for something to type into the shell:
+///
+///   `0` + bytes  input, passed to the pty verbatim
+///   `1` + JSON   this client's grid size, `{"rows":R,"cols":C}`
+fn on_client_message(sess: &crate::session::Session, client: u64, msg: &[u8]) {
+    let Some((&cmd, rest)) = msg.split_first() else {
+        return;
+    };
+    match cmd {
+        b'0' => {
+            let _ = sess.write_input(rest);
+        }
+        b'1' => match serde_json::from_slice::<ResizeBody>(rest) {
+            Ok(sz) => {
+                tracing::debug!(client, rows = sz.rows, cols = sz.cols, "client size");
+                let _ = sess.set_client_size(client, sz.rows, sz.cols);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                payload = %String::from_utf8_lossy(rest),
+                "bad resize message"
+            ),
+        },
+        other => tracing::warn!(
+            command = other,
+            "unknown websocket command byte; message dropped"
+        ),
+    }
+}
+
 /// Bytes out, input in. Replays the ring first so a fresh tab is not blank.
 async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     let Some(sess) = registry.get(id).await else {
@@ -254,6 +300,9 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
             .await;
         return;
     };
+    // Each socket is its own client, so its size constrains the pty only for
+    // as long as it stays attached.
+    let client = registry.alloc_client_id();
     let mut rx = sess.bytes_tx.subscribe();
 
     let ring = sess.ring_snapshot();
@@ -264,8 +313,8 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Text(t))) => { let _ = sess.write_input(t.as_bytes()); }
-                Some(Ok(Message::Binary(b))) => { let _ = sess.write_input(&b); }
+                Some(Ok(Message::Text(t))) => on_client_message(&sess, client, t.as_bytes()),
+                Some(Ok(Message::Binary(b))) => on_client_message(&sess, client, &b),
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => break,
             },
@@ -287,6 +336,8 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
             },
         }
     }
+    // Tab closed: stop holding the grid down to this client's size.
+    sess.drop_client(client);
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@
 //!
 //! See `DAEMON_PLAN.md` §7.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -107,7 +107,15 @@ pub struct Session {
     pub probe_kind: ProbeKind,
     pub term_state: Arc<Mutex<TerminalState>>,
     pub byte_ring: Arc<Mutex<VecDeque<u8>>>,
+    /// Effective grid size, i.e. what the PTY is actually running at.
     pub size: Mutex<(u16, u16)>,
+    /// Size each attached client asked for, keyed by client id. The PTY runs
+    /// at the per-axis minimum so every client can draw the grid without
+    /// clipping — a phone attached beside a wide terminal would otherwise be
+    /// fighting it, last writer winning.
+    client_sizes: Mutex<HashMap<u64, (u16, u16)>>,
+    /// Size to use while nobody is attached.
+    baseline_size: Mutex<(u16, u16)>,
     pub spawned_at_ms: u64,
     pub last_active_ms: Arc<AtomicU64>,
     pub alive: Arc<AtomicBool>,
@@ -243,6 +251,8 @@ impl Session {
             term_state,
             byte_ring,
             size: Mutex::new((rows, cols)),
+            client_sizes: Mutex::new(HashMap::new()),
+            baseline_size: Mutex::new((rows, cols)),
             spawned_at_ms: now,
             last_active_ms,
             alive,
@@ -275,7 +285,75 @@ impl Session {
         Ok(())
     }
 
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+    /// How many clients currently have a size registered.
+    pub fn attached_clients(&self) -> usize {
+        self.client_sizes.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Register or update one client's size, then re-apply the minimum.
+    pub fn set_client_size(&self, client: u64, rows: u16, cols: u16) -> Result<()> {
+        {
+            let mut m = self
+                .client_sizes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("client_sizes poisoned"))?;
+            m.insert(client, (rows.max(1), cols.max(1)));
+        }
+        self.apply_effective_size()
+    }
+
+    /// Forget a client that has gone away, and grow back if it was the
+    /// smallest one holding the grid down.
+    pub fn drop_client(&self, client: u64) {
+        let removed = self
+            .client_sizes
+            .lock()
+            .map(|mut m| m.remove(&client).is_some())
+            .unwrap_or(false);
+        if removed {
+            let _ = self.apply_effective_size();
+        }
+    }
+
+    /// Size to use while nothing is attached. Ignored whenever a client is,
+    /// since the minimum over attached clients governs then.
+    pub fn set_baseline_size(&self, rows: u16, cols: u16) -> Result<()> {
+        {
+            let mut b = self
+                .baseline_size
+                .lock()
+                .map_err(|_| anyhow::anyhow!("baseline poisoned"))?;
+            *b = (rows.max(1), cols.max(1));
+        }
+        self.apply_effective_size()
+    }
+
+    fn effective_size(&self) -> (u16, u16) {
+        let clients = self.client_sizes.lock();
+        if let Ok(m) = clients
+            && !m.is_empty()
+        {
+            let rows = m.values().map(|(r, _)| *r).min().unwrap_or(24);
+            let cols = m.values().map(|(_, c)| *c).min().unwrap_or(80);
+            return (rows, cols);
+        }
+        self.baseline_size.lock().map(|b| *b).unwrap_or((24, 80))
+    }
+
+    fn apply_effective_size(&self) -> Result<()> {
+        let (rows, cols) = self.effective_size();
+        let clients = self.attached_clients();
+        tracing::debug!(
+            session = self.id,
+            rows,
+            cols,
+            clients,
+            "pty size (minimum across attached clients)"
+        );
+        self.resize(rows, cols)
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         {
             let mut size = self
                 .size

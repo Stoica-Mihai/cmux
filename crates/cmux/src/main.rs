@@ -28,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::app::{App, Mode, PickerState, RenameState, SpawnState};
 
-fn run_connect_mode() -> Result<()> {
+fn run_connect_mode(http: Option<&str>) -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
@@ -40,7 +40,7 @@ fn run_connect_mode() -> Result<()> {
     }
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
-    let res = run_with_daemon(&mut terminal);
+    let res = run_with_daemon(&mut terminal, http);
     {
         use std::io::Write;
         let mut out = stdout();
@@ -51,10 +51,13 @@ fn run_connect_mode() -> Result<()> {
     res
 }
 
-fn run_with_daemon(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+fn run_with_daemon(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    http: Option<&str>,
+) -> Result<()> {
     let path = client::socket_path()
         .ok_or_else(|| anyhow::anyhow!("no $XDG_RUNTIME_DIR/$HOME for socket"))?;
-    let (handle, infos) = connect_mode::connect(&path)?;
+    let (handle, infos) = connect_mode::connect(&path, http)?;
     let size = terminal.size()?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut app = App::new(cwd, (size.height, size.width));
@@ -190,6 +193,12 @@ struct Cli {
     /// daemon is auto-spawned if no socket is present.
     #[arg(long)]
     connect: bool,
+
+    /// Start the daemon's HTTP + WebSocket API too, so the same sessions can
+    /// be picked up in a browser. Only applies when this command is the one
+    /// that spawns the daemon; a daemon already running keeps its own setting.
+    #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:7070")]
+    http: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -343,7 +352,7 @@ fn main() -> Result<()> {
         return run_ctl(cmd);
     }
     if cli.connect {
-        return run_connect_mode();
+        return run_connect_mode(cli.http.as_deref());
     }
 
     install_panic_hook();

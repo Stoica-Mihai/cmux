@@ -145,6 +145,32 @@ cmuxd http api on http://127.0.0.1:7070
   front it with a tunnel or an authenticating proxy before exposing it.
 ```
 
+### The terminal and the browser mirror each other
+
+They are not two views of two things. `cmux --connect` and a browser tab attach
+to the *same* PTYs in the same daemon, and both read and write: type in the
+terminal and it appears in the browser, type in the browser and it appears in
+the terminal. Leave your desk mid-session, open the page on a phone, keep going.
+
+If you want the browser available without planning ahead, have `cmux` start the
+daemon with the API already on:
+
+```sh
+cmux --connect --http               # 127.0.0.1:7070
+cmux --connect --http 127.0.0.1:9000
+```
+
+That flag only applies when this command is the one that starts the daemon. A
+daemon already running keeps whatever it was launched with, so for an
+always-available API start `cmuxd --http` from your shell profile or a systemd
+user unit and let `cmux --connect` find it.
+
+**Grid size with more than one client attached.** Each client reports its own
+size and the PTY runs at the smallest, exactly as tmux does. A phone at 24x80
+beside a wide terminal pins the session to 24x80 while it is attached, and the
+session grows back when it detaches. Without this the two clients fight, last
+writer winning, and whichever lost renders a clipped grid.
+
 ### Access control is yours, not the daemon's
 
 **cmuxd does no authentication.** A session is an arbitrary command, so anything
@@ -192,9 +218,17 @@ you authenticated.
 | `GET` | `/api/sessions/{id}/screen` | the visible grid as **plain text** |
 | `GET` | `/api/sessions/{id}/buffer` | the raw replay ring, escapes included |
 | `POST` | `/api/sessions/{id}/input` | body bytes go to the PTY verbatim |
-| `POST` | `/api/sessions/{id}/resize` | body `{rows, cols}` |
-| `GET` | `/ws/sessions/{id}` | WebSocket: binary frames out, input in |
+| `POST` | `/api/sessions/{id}/resize` | body `{rows, cols}`; sets the size used while nothing is attached, and answers `409` when a client is, since the minimum governs then |
+| `GET` | `/ws/sessions/{id}` | WebSocket: raw bytes out; in, a command byte then payload |
 | `GET` | `/` | browser terminal |
+
+The WebSocket sends raw PTY bytes to the client. Messages the other way start
+with a command byte, so a resize is never mistaken for something to type:
+
+| Message | Means |
+|---|---|
+| `0` + bytes | input, passed to the PTY verbatim |
+| `1` + `{"rows":R,"cols":C}` | this client's grid size |
 
 ### From a shell
 

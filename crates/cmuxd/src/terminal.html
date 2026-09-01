@@ -89,17 +89,18 @@ function bootTerminal() {
   term.loadAddon(fit);
   term.open($("term"));
   fit.fit();
-  term.onData(d => ws && ws.readyState === 1 && ws.send(d));
+  // "0" marks input; see pushSize for "1". Without the prefix the daemon
+  // could not tell a resize from something to type.
+  term.onData(d => ws && ws.readyState === 1 && ws.send("0" + d));
   window.addEventListener("resize", () => { fit.fit(); pushSize(); });
 }
 
-async function pushSize() {
-  if (current === null || !term) return;
-  await fetch(`/api/sessions/${current}/resize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rows: term.rows, cols: term.cols }),
-  }).catch(() => {});
+// Our own size, not the session's: the daemon runs the pty at the smallest
+// size among everyone attached, so the phone and the desktop can share one
+// session without fighting over it.
+function pushSize() {
+  if (!term || !ws || ws.readyState !== 1) return;
+  ws.send("1" + JSON.stringify({ rows: term.rows, cols: term.cols }));
 }
 
 async function refresh() {

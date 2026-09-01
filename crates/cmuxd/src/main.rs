@@ -165,6 +165,7 @@ fn ready_path() -> Result<PathBuf> {
 pub(crate) struct Registry {
     pub(crate) sessions: Mutex<HashMap<u64, Arc<Session>>>,
     next_id: AtomicU64,
+    next_client_id: AtomicU64,
 }
 
 impl Registry {
@@ -172,11 +173,26 @@ impl Registry {
         Self {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            next_client_id: AtomicU64::new(1),
         }
     }
 
     fn alloc_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// One id per attachment — a socket connection or a WebSocket — so each
+    /// client's requested grid size can be tracked separately.
+    pub(crate) fn alloc_client_id(&self) -> u64 {
+        self.next_client_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Forget a departed client everywhere, so a session it was holding small
+    /// can grow back for whoever is left.
+    pub(crate) async fn drop_client_everywhere(&self, client: u64) {
+        for sess in self.sessions.lock().await.values() {
+            sess.drop_client(client);
+        }
     }
 
     /// Sorted by id. Clients number sessions by their position here, so
@@ -368,6 +384,7 @@ fn kill_self() {
 }
 
 async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
+    let client_id = registry.alloc_client_id();
     let (mut read_half, write_half) = stream.into_split();
 
     // outbound queue: any task that wants to send an Event posts here, the writer
@@ -429,7 +446,9 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
         loop {
             match read_frame_async::<Request>(&mut read_half).await {
                 Ok(req) => {
-                    if let Err(e) = dispatch(req, &registry, &event_tx, &mut subscriptions).await {
+                    if let Err(e) =
+                        dispatch(req, &registry, &event_tx, &mut subscriptions, client_id).await
+                    {
                         let _ = event_tx
                             .send(Event::Error {
                                 request_id: None,
@@ -460,6 +479,8 @@ async fn handle_connection(stream: UnixStream, registry: Arc<Registry>) -> Resul
     for (_, h) in subscriptions.drain() {
         h.abort();
     }
+    // This client is gone, so it must stop constraining any session's size.
+    registry.drop_client_everywhere(client_id).await;
     drop(event_tx);
     let _ = writer_task.await;
     result
@@ -470,6 +491,7 @@ async fn dispatch(
     registry: &Arc<Registry>,
     event_tx: &mpsc::Sender<Event>,
     subscriptions: &mut HashMap<u64, tokio::task::JoinHandle<()>>,
+    client_id: u64,
 ) -> Result<()> {
     match req {
         Request::Hello { .. } => {
@@ -543,8 +565,10 @@ async fn dispatch(
             rows,
             cols,
         } => {
+            // This client's own size, not the session's. The PTY runs at the
+            // minimum across everyone attached.
             if let Some(sess) = registry.get(session_id).await {
-                sess.resize(rows, cols)?;
+                sess.set_client_size(client_id, rows, cols)?;
             }
         }
         Request::Rename { session_id, label } => {
