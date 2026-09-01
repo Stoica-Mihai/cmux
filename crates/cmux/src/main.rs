@@ -653,11 +653,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         app.should_quit = true;
         return Ok(());
     }
-    if keys::HARD_QUIT.matches(&key) {
-        app.should_quit = true;
-        return Ok(());
-    }
-
     let is_prefix_key = keys::PREFIX.matches(&key) || matches!(key.code, KeyCode::Char('\u{01}'));
 
     if app.prefix_pending {
@@ -1052,5 +1047,45 @@ mod tests {
         assert!(!should_pin_label(&saved("saved-dirname", false)));
         assert!(!should_pin_label(&saved("", true)));
         assert!(!should_pin_label(&saved("", false)));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+    fn plain(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Every command goes through the prefix. Ctrl+Q used to quit on its own,
+    /// which meant two bindings for one action and a key taken away from the
+    /// focused session.
+    #[test]
+    fn ctrl_q_is_not_a_quit_binding() {
+        let mut app = App::new(PathBuf::from("/tmp"), (24, 80));
+        handle_key(&mut app, ctrl('q')).expect("handle");
+        assert!(
+            !app.should_quit,
+            "Ctrl+Q quit without the prefix; quitting must go through it"
+        );
+    }
+
+    /// And the prefix reaches quit from a mode, not just the dashboard, so
+    /// dropping Ctrl+Q leaves no state without a way out.
+    #[test]
+    fn the_prefix_quits_from_inside_a_mode() {
+        let mut app = App::new(PathBuf::from("/tmp"), (24, 80));
+        app.mode = Mode::Help;
+
+        handle_key(&mut app, ctrl('a')).expect("handle");
+        assert!(app.prefix_pending, "the prefix is not armed inside a mode");
+
+        handle_key(&mut app, plain('q')).expect("handle");
+        assert!(app.should_quit, "Ctrl+A q did not quit from inside a mode");
     }
 }

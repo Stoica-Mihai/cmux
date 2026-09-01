@@ -100,7 +100,7 @@ to `cmux`, then `$PATH`) and waits up to 2 s for its socket. To run the daemon
 manually, just `cmuxd` in a separate terminal. `--connect` is still accepted,
 since it used to be required.
 
-`cmux` connects to `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` (fallback `/tmp/cmux-<uid>/cmux/`), lists existing sessions, and hydrates the sidebar. New sessions you spawn (`Ctrl+A n`) go through the daemon. Quitting `cmux` (`Ctrl+Q`) sends `Detach { keep_session: true }` for every session — `cmuxd` keeps them alive.
+`cmux` connects to `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` (fallback `/tmp/cmux-<uid>/cmux/`), lists existing sessions, and hydrates the sidebar. New sessions you spawn (`Ctrl+A n`) go through the daemon. Quitting `cmux` (`Ctrl+A q`) sends `Detach { keep_session: true }` for every session — `cmuxd` keeps them alive.
 
 ### Visual cues
 
@@ -302,9 +302,12 @@ The dashboard is always interactive — keystrokes are forwarded to the focused 
 | `[` | Enter scrollback mode on focused session |
 | `a` | Send a literal `Ctrl+A` to the focused session |
 | `?` | Help overlay |
-| `q` | Quit (terminates all sessions) |
+| `q` | Quit. Daemon-hosted sessions keep running; `--local` ones die with the process |
 
-`Ctrl+Q` = hard quit from anywhere.
+`Ctrl+A` is the only global binding — every command goes through it, so nothing
+is bound out from under the session you are typing into. It is accepted from
+inside every mode, so `Ctrl+A q` quits from the spawn browser or the rename
+prompt just as it does from the dashboard.
 
 ### Spawn dialog (directory browser)
 | Key | Action |

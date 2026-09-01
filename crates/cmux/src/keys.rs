@@ -24,11 +24,8 @@ const CTRL: KeyModifiers = KeyModifiers::CONTROL;
 // ---------------------------------------------------------------------------
 // Global
 // ---------------------------------------------------------------------------
-pub const HARD_QUIT: Chord = Chord {
-    codes: &[KeyCode::Char('q')],
-    mods: CTRL,
-    label: "Ctrl+Q",
-};
+/// The only global binding. Every command goes through it, so there is one
+/// way to do each thing and nothing is bound out from under a session.
 pub const PREFIX: Chord = Chord {
     codes: &[KeyCode::Char('a'), KeyCode::Char('A')],
     mods: CTRL,

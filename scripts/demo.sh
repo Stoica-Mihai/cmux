@@ -88,7 +88,7 @@ $TMUX send-keys -t demo C-a 4; sleep 2.0
 frame
 
 banner "7. quit the TUI — do the sessions survive?"
-$TMUX send-keys -t demo C-q
+$TMUX send-keys -t demo C-a q
 sleep 1.5
 "$CMUX" ctl list
 echo "(still hosted by the daemon, with no client attached)"
