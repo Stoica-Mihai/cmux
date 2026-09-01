@@ -6,6 +6,17 @@
 <title>cmuxd</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
 <style>
+  /* Served by cmuxd itself, not a CDN, so this works offline and on a device
+     that has no Nerd Font installed. */
+  @font-face { font-family:'cmux-mono'; src:url('/fonts/mono.woff2') format('woff2');
+               font-weight:400; font-style:normal; font-display:swap; }
+  @font-face { font-family:'cmux-mono'; src:url('/fonts/mono-bold.woff2') format('woff2');
+               font-weight:700; font-style:normal; font-display:swap; }
+  /* Powerline separators and Nerd Font icons. Last in the stack, so it is only
+     fetched for glyphs the text font lacks. */
+  @font-face { font-family:'cmux-symbols'; src:url('/fonts/symbols.woff2') format('woff2');
+               font-display:swap; }
+
   :root { --bg:#0f1216; --panel:#161b22; --line:#242c37; --fg:#c9d1d9; --dim:#7d8590; --accent:#4ba3ff; --warn:#ff6b6b; }
   * { box-sizing: border-box; }
   html, body { height:100%; margin:0; }
@@ -81,9 +92,23 @@ let term, fit, ws, current = null, autoAttached = false;
 
 function bootTerminal() {
   term = new Terminal({
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    // A locally installed symbols font wins over the served one, so a desktop
+    // that already has it never downloads the 1 MB.
+    fontFamily: "cmux-mono, cmux-symbols, ui-monospace, SFMono-Regular, Menlo, monospace",
     fontSize: 13, cursorBlink: true, scrollback: 10000,
-    theme: { background: '#0f1216', foreground: '#c9d1d9' },
+    // WezTerm's default palette. Setting only fg/bg left the 16 ANSI colours
+    // at xterm.js's defaults, so anything colourful — a statusline especially
+    // — came out a different colour than in the terminal it mirrors.
+    theme: {
+      background: '#000000', foreground: '#b3b3b3',
+      cursor: '#53ae71', selectionBackground: '#4d52f8',
+      black:   '#000000', red:     '#cc5555', green:  '#55cc55', yellow:  '#cdcd55',
+      blue:    '#5555cc', magenta: '#cc55cc', cyan:   '#7acaca', white:   '#cccccc',
+      brightBlack:  '#555555', brightRed:     '#ff5555',
+      brightGreen:  '#55ff55', brightYellow:  '#ffff55',
+      brightBlue:   '#5555ff', brightMagenta: '#ff55ff',
+      brightCyan:   '#55ffff', brightWhite:   '#ffffff',
+    },
   });
   fit = new FitAddon.FitAddon();
   term.loadAddon(fit);

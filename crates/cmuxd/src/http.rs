@@ -73,6 +73,7 @@ fn router(registry: Arc<Registry>) -> Router {
         .route("/api/sessions/{id}/input", post(input))
         .route("/api/sessions/{id}/resize", post(resize))
         .route("/ws/sessions/{id}", get(ws_session))
+        .route("/fonts/{name}", get(font))
         .with_state(registry)
 }
 
@@ -86,6 +87,34 @@ fn no_such_session(id: u64) -> Response {
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("terminal.html"))
+}
+
+/// Fonts compiled into the binary. The page cannot assume the device viewing
+/// it has a Nerd Font — a phone will not — and a statusline built from
+/// Powerline separators and Nerd icons renders as tofu without one. Serving
+/// them from the host's font directories would only work on the host, so they
+/// travel with the daemon. Regenerate with `scripts/vendor-fonts.sh`.
+fn embedded_font(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "mono.woff2" => Some(include_bytes!("../assets/fonts/mono.woff2")),
+        "mono-bold.woff2" => Some(include_bytes!("../assets/fonts/mono-bold.woff2")),
+        "symbols.woff2" => Some(include_bytes!("../assets/fonts/symbols.woff2")),
+        _ => None,
+    }
+}
+
+async fn font(Path(name): Path<String>) -> Response {
+    match embedded_font(&name) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "font/woff2"),
+                (header::CACHE_CONTROL, "public, max-age=604800, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, format!("no font {name}\n")).into_response(),
+    }
 }
 
 #[derive(Serialize)]
@@ -386,6 +415,43 @@ mod tests {
         let page = get(addr, "/").await;
         assert!(page.starts_with("HTTP/1.1 200"), "{page}");
         assert!(page.contains("<title>cmuxd</title>"), "{page}");
+    }
+
+    /// The page must not depend on the viewing device having these fonts, so
+    /// the binary has to actually carry them.
+    #[test]
+    fn fonts_are_compiled_into_the_binary() {
+        for name in ["mono.woff2", "mono-bold.woff2", "symbols.woff2"] {
+            let bytes = embedded_font(name).unwrap_or_else(|| panic!("{name} is not embedded"));
+            assert_eq!(&bytes[..4], b"wOF2", "{name} is not a woff2 file");
+            assert!(
+                bytes.len() > 10_000,
+                "{name} is only {} bytes; the vendored file looks wrong",
+                bytes.len()
+            );
+        }
+        assert!(embedded_font("../../../etc/passwd").is_none());
+        assert!(embedded_font("nope.woff2").is_none());
+    }
+
+    #[tokio::test]
+    async fn fonts_are_served() {
+        let (addr, _keepalive) = spawn_server().await;
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        s.write_all(
+            b"GET /fonts/symbols.woff2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("write");
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.expect("read");
+        let head = String::from_utf8_lossy(&out[..out.len().min(300)]).to_string();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("font/woff2"), "{head}");
+        assert!(out.len() > 100_000, "body was only {} bytes", out.len());
+
+        let missing = get(addr, "/fonts/nope.woff2").await;
+        assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
     }
 
     #[tokio::test]

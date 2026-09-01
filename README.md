@@ -258,9 +258,23 @@ sequences to parse.
 
 Open the address the daemon printed. The page lists sessions, attaches to one
 over the WebSocket, forwards keystrokes and pushes the rendered size back to the
-PTY. `?session=N` opens a specific one; otherwise it attaches to the first. The
-renderer is xterm.js from a CDN, so that page needs internet even though the
-daemon does not.
+PTY. `?session=N` opens a specific one; otherwise it attaches to the first.
+
+**Fonts ship inside the binary.** A statusline made of Powerline separators and
+Nerd Font icons renders as empty boxes on a device without those fonts, which a
+phone certainly is. `cmuxd` serves its own from `/fonts/`: JetBrains Mono, plus
+Symbols Nerd Font Mono subset to the Nerd Fonts ranges and recompressed as
+woff2 — 1.2 MB of assets, cached after first load. Nothing is fetched from the
+host's font directories, so every device renders the same. Regenerate them with
+`scripts/vendor-fonts.sh`; their licenses sit beside them in
+`crates/cmuxd/assets/fonts/`.
+
+The terminal uses WezTerm's default 16-colour palette. Setting only foreground
+and background left the ANSI colours at xterm.js's own defaults, so anything
+colourful came out a different colour than in the terminal it mirrors.
+
+The renderer itself is xterm.js from a CDN, so the page still needs internet for
+that even though the fonts and the daemon do not.
 
 ## Selecting text
 
