@@ -221,7 +221,7 @@ impl App {
     }
 
     pub fn spawn_session(&mut self, cwd: PathBuf, dangerous: bool) -> Result<()> {
-        self.spawn_session_inner(cwd, dangerous, None)
+        self.spawn_session_inner(cwd, dangerous, None, None)
     }
 
     pub fn spawn_resume(
@@ -230,7 +230,22 @@ impl App {
         dangerous: bool,
         session_id: String,
     ) -> Result<()> {
-        self.spawn_session_inner(cwd, dangerous, Some(session_id))
+        self.spawn_session_inner(cwd, dangerous, Some(session_id), None)
+    }
+
+    /// Respawn a saved session, carrying its label in the spawn itself.
+    /// Renaming it afterwards would mark it manually renamed on the daemon,
+    /// which stops the status probe ever updating the name again — the TUI
+    /// would follow the name the child picks while the daemon and the browser
+    /// kept the old one.
+    pub fn restore_session(
+        &mut self,
+        cwd: PathBuf,
+        dangerous: bool,
+        resume: Option<String>,
+        label: Option<String>,
+    ) -> Result<()> {
+        self.spawn_session_inner(cwd, dangerous, resume, label)
     }
 
     fn spawn_session_inner(
@@ -238,11 +253,13 @@ impl App {
         cwd: PathBuf,
         dangerous: bool,
         resume: Option<String>,
+        label: Option<String>,
     ) -> Result<()> {
-        let label = cwd
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cwd.display().to_string());
+        let label = label.filter(|l| !l.is_empty()).unwrap_or_else(|| {
+            cwd.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| cwd.display().to_string())
+        });
         let (rows, cols) = self.tile_size_for_new();
         let id = self.next_id;
         self.next_id += 1;

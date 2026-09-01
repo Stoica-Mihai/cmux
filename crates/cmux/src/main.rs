@@ -408,20 +408,25 @@ fn main() -> Result<()> {
 
 /// Respawn saved sessions. `App::spawn_*` route through the daemon whenever
 /// one is attached, so this serves both modes.
+/// Whether a saved label should be pinned on the daemon. Only a name the user
+/// chose: a label merely carried over from the last run has to stay
+/// overridable, or the status probe can never rename the session again and the
+/// TUI ends up showing a different name from the browser.
+fn should_pin_label(ps: &persist::PersistedSession) -> bool {
+    ps.manually_renamed && !ps.label.is_empty()
+}
+
 fn restore_saved(app: &mut App, saved: Vec<persist::PersistedSession>) {
     for ps in saved {
-        let res = if let Some(id) = ps.resume_id.clone() {
-            app.spawn_resume(ps.cwd.clone(), ps.dangerous, id)
-        } else {
-            app.spawn_session(ps.cwd.clone(), ps.dangerous)
-        };
+        let label = (!ps.label.is_empty()).then(|| ps.label.clone());
+        let res = app.restore_session(ps.cwd.clone(), ps.dangerous, ps.resume_id.clone(), label);
         if res.is_ok()
             && let Some(s) = app.sessions.last_mut()
         {
-            if !ps.label.is_empty() {
+            s.manually_renamed = ps.manually_renamed;
+            if should_pin_label(&ps) {
                 s.set_label(ps.label);
             }
-            s.manually_renamed = ps.manually_renamed;
         }
     }
 }
@@ -1021,4 +1026,31 @@ fn install_panic_hook() {
         let _ = execute!(stdout(), LeaveAlternateScreen);
         original(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(label: &str, manually_renamed: bool) -> persist::PersistedSession {
+        persist::PersistedSession {
+            cwd: PathBuf::from("/tmp"),
+            label: label.to_string(),
+            dangerous: false,
+            resume_id: None,
+            manually_renamed,
+        }
+    }
+
+    /// Both directions. A name the user typed is pinned, so the probe cannot
+    /// undo it. A label merely carried over from the last run is not, or the
+    /// probe can never rename the session and the TUI ends up showing a
+    /// different name from the browser.
+    #[test]
+    fn only_a_user_chosen_name_is_pinned_on_the_daemon() {
+        assert!(should_pin_label(&saved("mine", true)));
+        assert!(!should_pin_label(&saved("saved-dirname", false)));
+        assert!(!should_pin_label(&saved("", true)));
+        assert!(!should_pin_label(&saved("", false)));
+    }
 }

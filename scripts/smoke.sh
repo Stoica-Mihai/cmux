@@ -25,8 +25,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cmux-smoke.XXXXXX")"
 export XDG_RUNTIME_DIR="$WORK/run"
 export XDG_STATE_HOME="$WORK/state"
 export XDG_CONFIG_HOME="$WORK/config"
+# HOME too, so the claude probe reads a fake ~/.claude and never the real one.
+export HOME="$WORK/home"
 export PATH="$WORK/bin:$PATH"
-mkdir -p "$XDG_RUNTIME_DIR/cmux" "$WORK/bin"
+mkdir -p "$XDG_RUNTIME_DIR/cmux" "$WORK/bin" "$HOME/.claude/sessions"
 
 # Stand-in for claude, so the suite never launches the real CLI. It records
 # the argv the daemon exec'd, which is the thing under test.
@@ -161,6 +163,61 @@ else
     && ok "unknown session is a 404" || bad "unknown session is a 404"
   [ "$(code "$HTTP/")" = "200" ] \
     && ok "browser page is served" || bad "browser page is served"
+fi
+
+echo
+echo "one session, one name"
+# The TUI and the browser naming the same session differently has been a bug
+# twice: once because the probe's name never reached the API, once because
+# restoring a saved session pinned its label against the probe. Needs a real
+# TUI, so it runs only where tmux is available.
+if ! command -v tmux >/dev/null; then
+  echo "  skip  no tmux on PATH"
+elif [ -z "${HTTP:-}" ]; then
+  echo "  skip  no http api to compare against"
+else
+  TM=(tmux -L cmuxsmoke)
+
+  # Start from an empty daemon, so the restored session is the only one and
+  # the two names being compared are unambiguously the same session.
+  for id in $(curl -s "$HTTP/api/sessions" | grep -o '"id":[0-9]*' | cut -d: -f2); do
+    curl -s -o /dev/null -X DELETE "$HTTP/api/sessions/$id"
+  done
+  sleep 0.5
+
+  mkdir -p "$XDG_CONFIG_HOME/cmux"
+  cat > "$XDG_CONFIG_HOME/cmux/state.json" <<'JSON'
+{"show_sidebar":true,"sessions":[{"cwd":"/tmp","label":"saved-dirname",
+ "dangerous":false,"resume_id":null,"manually_renamed":false}]}
+JSON
+  "${TM[@]}" kill-server 2>/dev/null || true
+  "${TM[@]}" new-session -d -s s -x 150 -y 40 "$CMUX" 2>/dev/null
+  sleep 4
+
+  # Tell the probe the child picked a name for itself.
+  for pid in $(pgrep -P "$DAEMON_PID" 2>/dev/null); do
+    printf '{"status":"idle","name":"probe-picked"}' \
+      > "$HOME/.claude/sessions/$pid.json"
+  done
+  sleep 2.5
+
+  pane="$("${TM[@]}" capture-pane -p -t s 2>/dev/null || true)"
+  tui_name="$(printf '%s\n' "$pane" | sed -n 's/.*\[1\][^A-Za-z0-9_-]*\([A-Za-z0-9._-]*\).*/\1/p' | head -1)"
+  api_names="$(curl -s "$HTTP/api/sessions" | grep -o '"label":"[^"]*"' | cut -d'"' -f4)"
+  api_count="$(printf '%s\n' "$api_names" | grep -c . || true)"
+  "${TM[@]}" kill-server 2>/dev/null || true
+
+  echo "        TUI: '$tui_name'   API: '$api_names' ($api_count session)"
+  if [ "$api_count" != "1" ]; then
+    bad "exactly one session to compare" "the daemon has $api_count"
+  elif [ -z "$tui_name" ]; then
+    bad "the TUI showed a session to compare" "no session row found in the pane"
+  elif [ "$tui_name" = "$api_names" ]; then
+    ok "the TUI and the API agree on a restored session's name"
+  else
+    bad "the TUI and the API agree on a restored session's name" \
+        "TUI '$tui_name' vs API '$api_names' — same session, two names"
+  fi
 fi
 
 echo
