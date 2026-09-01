@@ -281,7 +281,12 @@ fn run_ctl(cmd: CtlCmd) -> Result<()> {
                                 s.rows,
                                 s.cols,
                                 s.cmd.join(" "),
-                                if s.attention { "  ⚠" } else { "" }
+                                match (&s.alive, &s.exit_status) {
+                                    (false, Some(st)) => format!("  ({st})"),
+                                    (false, None) => "  (exited)".to_string(),
+                                    _ if s.attention => "  ⚠".to_string(),
+                                    _ => String::new(),
+                                }
                             );
                         }
                     }

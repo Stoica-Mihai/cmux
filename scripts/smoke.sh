@@ -123,6 +123,21 @@ esac
 check "the other sessions survive the kill" "sleep 120" "$AFTER"
 
 echo
+echo "dead sessions"
+"$CMUX" ctl spawn /tmp --label doomed -- sh -c "exit 7" >/dev/null 2>&1
+sleep 1.5
+DEAD_LIST="$("$CMUX" ctl list 2>&1)"
+check "an exited session stays listed"    "doomed"      "$DEAD_LIST"
+check "the list reports how it exited"    "(exited 7)"  "$DEAD_LIST"
+# A child nothing waits on stays as a zombie, holding its slot in the process
+# table for as long as the daemon runs.
+ZOMBIES="$(pgrep -P "$DAEMON_PID" 2>/dev/null | while read -r p; do
+  [ "$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)" = "Z" ] && echo "$p"
+done)"
+if [ -z "$ZOMBIES" ]; then ok "the daemon reaps the child it started"
+else bad "the daemon reaps the child it started" "zombie pids: $ZOMBIES"; fi
+
+echo
 echo "http api"
 HTTP="$(sed -n 's|^cmuxd http api on \(http://[0-9.:]*\)$|\1|p' "$WORK/cmuxd.log" | head -1)"
 if ! command -v curl >/dev/null; then

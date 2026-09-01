@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 /// 2 made `SpawnSession` command-generic; 3 dropped the `Snapshot` event,
 /// which was always sent empty and never read; 4 put the effective grid size
 /// on `StatusUpdate`, so a client renders at the size the pty actually runs
-/// at rather than the one it asked for. A stale client is rejected at the
+/// at rather than the one it asked for; 5 reports whether the child is still
+/// alive, which nothing could see before. A stale client is rejected at the
 /// handshake rather than left to fail on a decode.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Environment variables exported by outer terminals that misadvertise the
 /// host capabilities to the child. cmux IS the terminal the child sees; strip
@@ -167,6 +168,11 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     /// The session wants the user to look at it (claude: a permission prompt).
     pub attention: bool,
+    /// False once the child has exited. Nothing reported this before, so a
+    /// crashed session went on being listed as running for ever.
+    pub alive: bool,
+    /// How it ended, once it has.
+    pub exit_status: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -631,8 +631,29 @@ async fn dispatch(
                         cols: info.cols,
                     })
                     .await;
+                let mut was_alive = true;
                 while info_rx.changed().await.is_ok() {
                     let info = info_rx.borrow().clone();
+                    // The child died on its own. Only an explicit kill used to
+                    // produce this event, so a crashed session went on being
+                    // drawn as running by every client.
+                    if was_alive && !info.alive {
+                        was_alive = false;
+                        let status = info
+                            .exit_status
+                            .clone()
+                            .unwrap_or_else(|| "exited".to_string());
+                        if tx2
+                            .send(Event::SessionExited {
+                                id: session_id,
+                                status,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     if tx2
                         .send(Event::StatusUpdate {
                             id: session_id,

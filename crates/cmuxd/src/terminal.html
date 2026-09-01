@@ -49,7 +49,15 @@
   button:hover { border-color:var(--accent); }
   main { flex:1; display:flex; flex-direction:column; min-width:0; }
   #bar { padding:8px 12px; border-bottom:1px solid var(--line); color:var(--dim);
-         font-size:12px; font-family:ui-monospace, monospace; }
+         font-size:12px; font-family:ui-monospace, monospace;
+         display:flex; gap:12px; align-items:baseline; }
+  /* Session state lives here, never in the terminal: the daemon repaints that
+     grid whenever the size changes, which would wipe anything written into it. */
+  #bar-title { flex:1; min-width:0; white-space:nowrap; overflow:hidden;
+               text-overflow:ellipsis; }
+  #bar-state { flex:0 0 auto; }
+  #bar-state.dead { color:var(--warn); }
+  #bar-state.gone { color:var(--dim); }
   #term { flex:1; min-height:0; padding:6px 8px; }
   #empty { flex:1; display:flex; align-items:center; justify-content:center;
            color:var(--dim); text-align:center; padding:24px; }
@@ -73,7 +81,7 @@
   </footer>
 </aside>
 <main>
-  <div id="bar">no session selected</div>
+  <div id="bar"><span id="bar-title">no session selected</span><span id="bar-state"></span></div>
   <!-- One child, so the flex container does not turn the text and <br> into
        separate anonymous flex items and drop the line break. -->
   <div id="empty"><div>No sessions yet. Spawn one from the panel, or run<br>
@@ -147,6 +155,8 @@ async function refresh() {
       && (term.rows !== mine.rows || term.cols !== mine.cols)) {
     term.resize(mine.cols, mine.rows);
   }
+  // Catches a session that died while this tab had no socket open.
+  if (mine && !mine.alive) setState(mine.exit_status || "exited", "dead");
 
   $("count").textContent = sessions.length + (sessions.length === 1 ? " session" : " sessions");
   $("list").innerHTML = "";
@@ -154,6 +164,8 @@ async function refresh() {
     const row = document.createElement("div");
     row.className = "row" + (s.id === current ? " on" : "");
     const badges = [];
+    if (!s.alive) badges.push(
+      `<span class="badge warn">${escapeHtml(s.exit_status || "exited")}</span>`);
     if (s.attention) badges.push('<span class="badge warn">attention</span>');
     if (s.status === "Busy") badges.push('<span class="badge busy">busy</span>');
     if (s.probe && s.probe.kind === "Claude") badges.push('<span class="badge">claude</span>');
@@ -182,7 +194,8 @@ function attach(s) {
   if (!term) bootTerminal();
   term.reset();
   fit.fit();
-  $("bar").textContent = `[${s.id}] ${s.label}   ${s.cmd.join(" ")}`;
+  $("bar-title").textContent = `[${s.id}] ${s.label}   ${s.cmd.join(" ")}`;
+  setState(s.alive ? "" : (s.exit_status || "exited"), "dead");
   refresh();
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -198,9 +211,20 @@ function attach(s) {
     try { msg = JSON.parse(e.data); } catch { term.write(e.data); return; }
     if (msg.type === "size" && msg.rows > 0 && msg.cols > 0) {
       if (term.rows !== msg.rows || term.cols !== msg.cols) term.resize(msg.cols, msg.rows);
+    } else if (msg.type === "exited") {
+      setState(msg.status, "dead");
+      refresh();
     }
   };
-  ws.onclose = () => term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
+  // Only when the session is still running: for a dead one the exit is the
+  // more useful thing to keep on screen.
+  ws.onclose = () => { if (!$("bar-state").textContent) setState("disconnected", "gone"); };
+}
+
+function setState(text, kind) {
+  const el = $("bar-state");
+  el.textContent = text;
+  el.className = text ? kind : "";
 }
 
 $("spawn").onclick = async () => {

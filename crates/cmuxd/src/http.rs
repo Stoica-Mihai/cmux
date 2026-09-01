@@ -340,10 +340,11 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     let mut rx = sess.bytes_tx.subscribe();
     let mut info_rx = sess.info_rx.clone();
 
-    let mut last_size = {
+    let (mut last_size, already_dead) = {
         let i = info_rx.borrow();
-        (i.rows, i.cols)
+        ((i.rows, i.cols), (!i.alive).then(|| i.exit_status.clone()))
     };
+    let mut announced_exit = false;
     if send_size(&mut socket, last_size).await.is_err() {
         return;
     }
@@ -351,6 +352,15 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
     let opening = sess.attach_payload();
     if !opening.is_empty() && socket.send(Message::Binary(opening.into())).await.is_err() {
         return;
+    }
+
+    // A session that died before this tab opened never fires a watch change,
+    // so say so here or the last screen looks like a live one.
+    if let Some(status) = already_dead {
+        announced_exit = true;
+        if send_exited(&mut socket, status).await.is_err() {
+            return;
+        }
     }
 
     loop {
@@ -381,10 +391,16 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
                 if changed.is_err() {
                     break;
                 }
-                let now = {
+                let (now, alive, exit) = {
                     let i = info_rx.borrow();
-                    (i.rows, i.cols)
+                    ((i.rows, i.cols), i.alive, i.exit_status.clone())
                 };
+                if !alive && !announced_exit {
+                    announced_exit = true;
+                    if send_exited(&mut socket, exit).await.is_err() {
+                        break;
+                    }
+                }
                 if now != last_size {
                     last_size = now;
                     // Size first, then a repaint at that size. A client that
@@ -407,6 +423,17 @@ async fn pump(mut socket: WebSocket, id: u64, registry: Arc<Registry>) {
 
 async fn send_size(socket: &mut WebSocket, (rows, cols): (u16, u16)) -> Result<(), ()> {
     let msg = format!(r#"{{"type":"size","rows":{rows},"cols":{cols}}}"#);
+    socket.send(Message::Text(msg.into())).await.map_err(|_| ())
+}
+
+/// Built through serde_json because the status carries an OS error string,
+/// which can hold a quote and would otherwise break the frame.
+async fn send_exited(socket: &mut WebSocket, status: Option<String>) -> Result<(), ()> {
+    let msg = serde_json::json!({
+        "type": "exited",
+        "status": status.unwrap_or_else(|| "exited".to_string()),
+    })
+    .to_string();
     socket.send(Message::Text(msg.into())).await.map_err(|_| ())
 }
 

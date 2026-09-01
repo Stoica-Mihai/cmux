@@ -37,7 +37,7 @@ use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context, Result};
 use cmux_proto::{ProbeKind, SessionInfo, SessionStatus};
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, watch};
 
 use crate::probe::{ProbeCtx, StatusProbe};
@@ -125,13 +125,13 @@ pub struct Session {
     manually_renamed: AtomicBool,
     pub pid: Option<u32>,
     pub bytes_tx: broadcast::Sender<Vec<u8>>,
-    pub info_tx: watch::Sender<SessionInfo>,
+    pub info_tx: Arc<watch::Sender<SessionInfo>>,
     pub info_rx: watch::Receiver<SessionInfo>,
+    /// How the child ended, once it has. Written by the reader thread.
+    exit_status: Arc<Mutex<Option<String>>>,
     probe: Option<Box<dyn StatusProbe>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn std::io::Write + Send>>,
-    #[allow(dead_code)]
-    child: Mutex<Box<dyn Child + Send + Sync>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     #[allow(dead_code)]
     reader_thread: JoinHandle<()>,
@@ -202,8 +202,12 @@ impl Session {
             last_active_ms: now,
             status: SessionStatus::Unknown,
             attention: false,
+            alive: true,
+            exit_status: None,
         };
         let (info_tx, info_rx) = watch::channel(info);
+        let info_tx = Arc::new(info_tx);
+        let exit_status: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let reader_thread = {
             let term_state = term_state.clone();
@@ -212,6 +216,12 @@ impl Session {
             let last_active_t = last_active_ms.clone();
             let ring_t = byte_ring.clone();
             let bytes_tx_t = bytes_tx.clone();
+            let info_tx_t = info_tx.clone();
+            let exit_status_t = exit_status.clone();
+            // The reader owns the child so it can wait on it the moment the
+            // pty closes. Nothing waited before, so every finished session
+            // left a zombie in the process table.
+            let mut child = child;
             let mut reader = reader;
             std::thread::Builder::new()
                 .name(format!("pty-reader-{}", id))
@@ -240,7 +250,24 @@ impl Session {
                             Err(_) => break,
                         }
                     }
+                    // The pty closed, so the child is on its way out. Wait on
+                    // it here: this is what reaps the zombie, and it is the
+                    // only place the exit status is available.
+                    let status = match child.wait() {
+                        Ok(s) if s.success() => "exited 0".to_string(),
+                        Ok(s) => format!("exited {}", s.exit_code()),
+                        Err(e) => format!("wait failed: {e}"),
+                    };
+                    if let Ok(mut slot) = exit_status_t.lock() {
+                        *slot = Some(status.clone());
+                    }
                     alive_t.store(false, Ordering::SeqCst);
+                    // Publish it, or every client goes on showing the session
+                    // as running.
+                    let mut info = info_tx_t.borrow().clone();
+                    info.alive = false;
+                    info.exit_status = Some(status);
+                    let _ = info_tx_t.send(info);
                 })?
         };
 
@@ -265,9 +292,9 @@ impl Session {
             bytes_tx,
             info_tx,
             info_rx,
+            exit_status,
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
-            child: Mutex::new(child),
             killer: Mutex::new(killer),
             reader_thread,
         }))
@@ -437,6 +464,8 @@ impl Session {
             last_active_ms: self.last_active_ms.load(Ordering::SeqCst),
             status: observed.status,
             attention: observed.attention,
+            alive: self.alive.load(Ordering::SeqCst),
+            exit_status: self.exit_status.lock().ok().and_then(|s| s.clone()),
         }
     }
 
@@ -671,6 +700,49 @@ mod tests {
             "printf 'old frame\\r\\n'; \
              printf '\\033[2J\\033[H\\033[32mnew frame\\033[0m\\r\\n'; sleep 5",
             false,
+        );
+    }
+
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = stat.rsplit_once(')')?.1;
+        after.split_whitespace().next()?.chars().next()
+    }
+
+    /// A finished session used to leave a zombie in the process table and go
+    /// on being reported as running, because nothing ever waited on the child.
+    #[test]
+    fn a_finished_session_is_reaped_and_reported() {
+        let sess = Session::spawn(
+            1,
+            "shortlived".into(),
+            PathBuf::from("/tmp"),
+            vec!["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            ProbeKind::None,
+            24,
+            80,
+        )
+        .expect("spawn");
+        let pid = sess.pid.expect("a pid");
+        assert!(sess.info().alive, "it should start out alive");
+
+        // The reader thread waits on the child as soon as the pty closes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sess.info().alive && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_ne!(
+            proc_state(pid),
+            Some('Z'),
+            "pid {pid} is a zombie; nothing waited on it"
+        );
+        let info = sess.info();
+        assert!(!info.alive, "the session is still reported as running");
+        assert_eq!(
+            info.exit_status.as_deref(),
+            Some("exited 3"),
+            "the exit status was not recorded"
         );
     }
 

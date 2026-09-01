@@ -161,7 +161,11 @@ fn sidebar_header_spans(
     } else {
         Style::default().fg(theme::FG)
     };
-    let state_suffix = if !alive { " (exited)" } else { "" };
+    let state_suffix = match (alive, s.exit_status()) {
+        (true, _) => String::new(),
+        (false, Some(status)) => format!(" ({status})"),
+        (false, None) => " (exited)".to_string(),
+    };
     vec![
         Span::styled(
             format!("{} ", badge_glyph),

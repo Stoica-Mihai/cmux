@@ -152,6 +152,7 @@ pub struct DaemonSlot {
     pub alive: Arc<AtomicBool>,
     pub last_active_ms: Arc<AtomicU64>,
     pub pending_status: Arc<Mutex<Option<PendingStatus>>>,
+    pub exit_status: Arc<Mutex<Option<String>>>,
 }
 
 /// Latest `Event::StatusUpdate` payload that hasn't yet been merged into the
@@ -202,6 +203,9 @@ pub struct Session {
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
     daemon_pending_status: Option<Arc<Mutex<Option<PendingStatus>>>>,
+    /// How the child ended, once it has. Set by the events reader for a daemon
+    /// session and by `is_alive` for a local one.
+    exit_status: Arc<Mutex<Option<String>>>,
     backend: Backend,
 }
 
@@ -302,6 +306,7 @@ impl Session {
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             daemon_pending_status: None,
+            exit_status: Arc::new(Mutex::new(None)),
             backend: Backend::Local {
                 master: pair.master,
                 writer,
@@ -336,6 +341,7 @@ impl Session {
             Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
         let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
         let pending_status: Arc<Mutex<Option<PendingStatus>>> = Arc::new(Mutex::new(None));
+        let exit_status: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let slot = DaemonSlot {
             parser: parser.clone(),
             byte_ring: byte_ring.clone(),
@@ -343,6 +349,7 @@ impl Session {
             alive: alive.clone(),
             last_active_ms: last_active_ms.clone(),
             pending_status: pending_status.clone(),
+            exit_status: exit_status.clone(),
         };
         let s = Self {
             id,
@@ -367,6 +374,7 @@ impl Session {
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             daemon_pending_status: Some(pending_status),
+            exit_status,
             backend: Backend::Daemon { remote_id, req_tx },
         };
         (s, slot)
@@ -558,14 +566,28 @@ impl Session {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
+    /// How the child ended, once it has. `None` while it is still running.
+    pub fn exit_status(&self) -> Option<String> {
+        self.exit_status.lock().ok().and_then(|s| s.clone())
+    }
+
     pub fn is_alive(&mut self) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
             return false;
         }
         match &mut self.backend {
             Backend::Local { child, .. } => match child.try_wait() {
-                Ok(Some(_)) => {
+                Ok(Some(st)) => {
                     self.alive.store(false, Ordering::SeqCst);
+                    if let Ok(mut slot) = self.exit_status.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(if st.success() {
+                            "exited 0".to_string()
+                        } else {
+                            format!("exited {}", st.exit_code())
+                        });
+                    }
                     false
                 }
                 _ => true,

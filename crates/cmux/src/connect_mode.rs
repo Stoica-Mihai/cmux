@@ -198,10 +198,13 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
                             slot.dirty.store(true, Ordering::Relaxed);
                         }
                     }
-                    Event::SessionExited { id, .. } => {
+                    Event::SessionExited { id, status } => {
                         if let Ok(m) = slots_for_reader.lock()
                             && let Some(slot) = m.get(&id)
                         {
+                            if let Ok(mut s) = slot.exit_status.lock() {
+                                *s = Some(status);
+                            }
                             slot.alive.store(false, Ordering::SeqCst);
                             slot.dirty.store(true, Ordering::Relaxed);
                         }
