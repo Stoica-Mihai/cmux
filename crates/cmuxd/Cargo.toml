@@ -11,6 +11,7 @@ path = "src/main.rs"
 cmux-proto = { path = "../cmux-proto" }
 alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 nix = { version = "0.30", default-features = false, features = ["fs", "signal"] }
 portable-pty = { workspace = true }
 serde = { workspace = true }

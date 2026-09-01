@@ -63,7 +63,9 @@ trap cleanup EXIT
 
 echo "cmux smoke test  (profile=$PROFILE, work=$WORK)"
 
-"$CMUXD" >"$WORK/cmuxd.log" 2>&1 &
+# Port 0 lets the kernel pick, so the suite never collides with a real daemon
+# or another run of itself. The daemon prints the address it actually bound.
+"$CMUXD" --http 127.0.0.1:0 >"$WORK/cmuxd.log" 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 50); do
   [ -S "$XDG_RUNTIME_DIR/cmux/cmuxd.sock" ] && break
@@ -117,6 +119,53 @@ case "$AFTER" in
   *)               ok "kill removes the session" ;;
 esac
 check "the other sessions survive the kill" "sleep 120" "$AFTER"
+
+echo
+echo "http api"
+HTTP="$(sed -n 's|^cmuxd http api on \(http://[0-9.:]*\)$|\1|p' "$WORK/cmuxd.log" | head -1)"
+TOKEN_FILE="$XDG_RUNTIME_DIR/cmux/http-token"
+if ! command -v curl >/dev/null; then
+  echo "  skip  no curl on PATH"
+elif [ -z "$HTTP" ] || [ ! -f "$TOKEN_FILE" ]; then
+  bad "http api came up" "no address in cmuxd.log, or no token file"
+else
+  ok "http api bound $HTTP"
+  TOKEN="$(cat "$TOKEN_FILE")"
+  A=(-H "Authorization: Bearer $TOKEN")
+
+  perms="$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || stat -f '%Lp' "$TOKEN_FILE")"
+  if [ "$perms" = "600" ]; then ok "token file is mode 0600"
+  else bad "token file is mode 0600" "got $perms"; fi
+
+  code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+  [ "$(code "$HTTP/api/health")" = "401" ] \
+    && ok "unauthenticated request is refused" \
+    || bad "unauthenticated request is refused" "got $(code "$HTTP/api/health")"
+  [ "$(code -H 'Authorization: Bearer wrong' "$HTTP/api/health")" = "401" ] \
+    && ok "a wrong token is refused" || bad "a wrong token is refused"
+  [ "$(code "${A[@]}" "$HTTP/api/health")" = "200" ] \
+    && ok "a good token is accepted" || bad "a good token is accepted"
+  [ "$(code "$HTTP/api/health?token=$TOKEN")" = "200" ] \
+    && ok "?token= works (browsers cannot set headers)" \
+    || bad "?token= works"
+
+  NEW="$(curl -s "${A[@]}" -H 'Content-Type: application/json' \
+    -d '{"cmd":["bash","--norc","--noprofile"],"cwd":"/tmp","label":"http"}' \
+    "$HTTP/api/sessions")"
+  check "spawns a session over HTTP" '"label":"http"' "$NEW"
+  NEW_ID="$(printf '%s' "$NEW" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+
+  curl -s -o /dev/null "${A[@]}" --data-binary $'echo SMOKE-OVER-HTTP-$((6*7))\n' \
+    "$HTTP/api/sessions/$NEW_ID/input"
+  sleep 1
+  check "input reaches the pty and shows on the screen" "SMOKE-OVER-HTTP-42" \
+    "$(curl -s "${A[@]}" "$HTTP/api/sessions/$NEW_ID/screen")"
+
+  [ "$(code "${A[@]}" "$HTTP/api/sessions/9999/screen")" = "404" ] \
+    && ok "unknown session is a 404" || bad "unknown session is a 404"
+  [ "$(code "$HTTP/?token=$TOKEN")" = "200" ] \
+    && ok "browser page is served" || bad "browser page is served"
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"

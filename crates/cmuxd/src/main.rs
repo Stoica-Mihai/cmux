@@ -3,6 +3,7 @@
 //! The daemon is command-agnostic: it execs whatever argv a client sends, and
 //! delegates anything it can say about the child to a [`probe`].
 
+mod http;
 mod probe;
 mod session;
 
@@ -24,40 +25,65 @@ use crate::session::Session;
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub(crate) const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:7070";
+
 const USAGE: &str = "\
 cmuxd — the cmux session daemon
 
-Usage: cmuxd
+Usage: cmuxd [--http [ADDR]]
 
-Takes no options. Listens on $XDG_RUNTIME_DIR/cmux/cmuxd.sock (fallback
-/tmp/cmux-<uid>/<home>/cmux) and hosts one PTY per session. Drive it with
-`cmux --connect` or `cmux ctl`.
+Hosts one PTY per session, on $XDG_RUNTIME_DIR/cmux/cmuxd.sock (fallback
+/tmp/cmux-<uid>/<home>/cmux). Drive it with `cmux --connect` or `cmux ctl`.
 
+  --http [ADDR]  also serve the HTTP + WebSocket API, default 127.0.0.1:7070.
+                 Prints a URL carrying a bearer token, and writes that token to
+                 <runtime-dir>/cmux/http-token with mode 0600.
   -h, --help     print this message
   -V, --version  print the version
 
 Environment:
-  CMUXD_LOG      tracing filter, e.g. `debug` or `cmuxd=trace,info`";
+  CMUXD_LOG         tracing filter, e.g. `debug` or `cmuxd=trace,info`
+  CMUXD_HTTP_TOKEN  use this token rather than generating one";
+
+/// Runtime options. Only `--http` is configurable; everything else is derived.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Config {
+    pub(crate) http: Option<String>,
+}
 
 /// What the daemon should do about its argv.
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
-    Run,
+    Run(Config),
     Print(String),
     Reject(String),
 }
 
-/// `cmuxd` accepts no options, but it used to ignore argv entirely — so
-/// `cmuxd --help` silently started a daemon and blocked.
+/// cmuxd once ignored argv entirely, so `cmuxd --help` silently started a
+/// daemon and blocked.
 fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Cli {
-    match args.into_iter().next() {
-        None => Cli::Run,
-        Some(arg) => match arg.as_str() {
-            "-h" | "--help" => Cli::Print(USAGE.to_string()),
-            "-V" | "--version" => Cli::Print(format!("cmuxd {SERVER_VERSION}")),
-            other => Cli::Reject(format!("cmuxd: unexpected argument `{other}`")),
-        },
+    let mut cfg = Config::default();
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Cli::Print(USAGE.to_string()),
+            "-V" | "--version" => return Cli::Print(format!("cmuxd {SERVER_VERSION}")),
+            // The address is optional, so only consume the next token when it
+            // is not itself a flag.
+            "--http" => {
+                let addr = match args.peek() {
+                    Some(next) if !next.starts_with('-') => args.next(),
+                    _ => None,
+                };
+                cfg.http = Some(addr.unwrap_or_else(|| DEFAULT_HTTP_ADDR.to_string()));
+            }
+            other => match other.strip_prefix("--http=") {
+                Some(addr) if !addr.is_empty() => cfg.http = Some(addr.to_string()),
+                _ => return Cli::Reject(format!("cmuxd: unexpected argument `{other}`")),
+            },
+        }
     }
+    Cli::Run(cfg)
 }
 
 fn log_dir() -> Option<PathBuf> {
@@ -135,9 +161,9 @@ fn ready_path() -> Result<PathBuf> {
     Ok(socket_dir()?.join("cmuxd.ready"))
 }
 
-/// Daemon-global state shared across all connections.
-struct Registry {
-    sessions: Mutex<HashMap<u64, Arc<Session>>>,
+/// Daemon-global state shared across the unix socket and the HTTP API.
+pub(crate) struct Registry {
+    pub(crate) sessions: Mutex<HashMap<u64, Arc<Session>>>,
     next_id: AtomicU64,
 }
 
@@ -155,7 +181,7 @@ impl Registry {
 
     /// Sorted by id. Clients number sessions by their position here, so
     /// HashMap iteration order would renumber every session on reconnect.
-    async fn list(&self) -> Vec<cmux_proto::SessionInfo> {
+    pub(crate) async fn list(&self) -> Vec<cmux_proto::SessionInfo> {
         let sessions = self.sessions.lock().await;
         let mut out: Vec<cmux_proto::SessionInfo> = sessions.values().map(|s| s.info()).collect();
         out.sort_by_key(|s| s.id);
@@ -166,19 +192,43 @@ impl Registry {
         self.sessions.lock().await.insert(sess.id, sess);
     }
 
-    async fn get(&self, id: u64) -> Option<Arc<Session>> {
+    pub(crate) async fn get(&self, id: u64) -> Option<Arc<Session>> {
         self.sessions.lock().await.get(&id).cloned()
     }
 
-    async fn remove(&self, id: u64) -> Option<Arc<Session>> {
+    pub(crate) async fn remove(&self, id: u64) -> Option<Arc<Session>> {
         self.sessions.lock().await.remove(&id)
     }
 }
 
+/// Spawn a session and register it. Both transports go through here, so they
+/// cannot drift on default labelling, size clamping, or the status ticker.
+pub(crate) async fn spawn_session(
+    registry: &Arc<Registry>,
+    cwd: PathBuf,
+    cmd: Vec<String>,
+    probe: cmux_proto::ProbeKind,
+    label: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> Result<cmux_proto::SessionInfo> {
+    let id = registry.alloc_id();
+    let label = label.unwrap_or_else(|| {
+        cwd.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string())
+    });
+    let sess = Session::spawn(id, label, cwd, cmd, probe, rows.max(1), cols.max(1))
+        .context("Session::spawn")?;
+    registry.insert(sess.clone()).await;
+    spawn_status_task(sess.clone());
+    Ok(sess.info())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    match parse_cli(std::env::args().skip(1)) {
-        Cli::Run => {}
+    let config = match parse_cli(std::env::args().skip(1)) {
+        Cli::Run(cfg) => cfg,
         Cli::Print(text) => {
             println!("{text}");
             return Ok(());
@@ -187,7 +237,7 @@ async fn main() -> Result<()> {
             eprintln!("{msg}\n\n{USAGE}");
             std::process::exit(2);
         }
-    }
+    };
 
     let _log_guard = init_logging();
     if let Some((_, ref p)) = _log_guard {
@@ -218,6 +268,30 @@ async fn main() -> Result<()> {
 
     let registry = Arc::new(Registry::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    if let Some(addr) = config.http.as_deref() {
+        let token = match std::env::var("CMUXD_HTTP_TOKEN") {
+            Ok(t) if !t.is_empty() => t,
+            _ => http::generate_token().context("generate http token")?,
+        };
+        let token_path = dir.join("http-token");
+        fs::write(&token_path, &token)
+            .with_context(|| format!("write {}", token_path.display()))?;
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).ok();
+
+        let bound = http::serve(
+            addr,
+            registry.clone(),
+            token.clone(),
+            shutdown_tx.subscribe(),
+        )
+        .await
+        .context("start http api")?;
+        tracing::info!(%bound, "http api listening");
+        println!("cmuxd http api on http://{bound}");
+        println!("  browser: http://{bound}/?token={token}");
+        println!("  token:   {} (mode 0600)", token_path.display());
+    }
 
     let accept_shutdown = shutdown_tx.clone();
     let accept_registry = registry.clone();
@@ -266,6 +340,7 @@ async fn main() -> Result<()> {
 
     let _ = fs::remove_file(&sock);
     let _ = fs::remove_file(&ready);
+    let _ = fs::remove_file(dir.join("http-token"));
     Ok(())
 }
 
@@ -427,17 +502,8 @@ async fn dispatch(
             rows,
             cols,
         } => {
-            let id = registry.alloc_id();
-            let label = label.unwrap_or_else(|| {
-                cwd.file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| cwd.display().to_string())
-            });
-            let sess = Session::spawn(id, label, cwd, cmd, probe, rows.max(1), cols.max(1))
-                .context("Session::spawn")?;
-            registry.insert(sess.clone()).await;
-            spawn_status_task(sess.clone());
-            let info = sess.info();
+            let info = spawn_session(registry, cwd, cmd, probe, label, rows, cols).await?;
+            let id = info.id;
             let _ = event_tx.send(Event::SessionSpawned { id, info }).await;
         }
         Request::Attach { session_id, .. } => {
@@ -684,9 +750,43 @@ mod tests {
         }
     }
 
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn bare_cmuxd_runs_the_daemon() {
-        assert_eq!(parse_cli(Vec::<String>::new()), Cli::Run);
+    fn bare_cmuxd_runs_the_daemon_with_no_http() {
+        assert_eq!(parse_cli(Vec::<String>::new()), Cli::Run(Config::default()));
+    }
+
+    #[test]
+    fn http_is_opt_in_and_takes_an_optional_address() {
+        // Bare --http means the default address.
+        assert_eq!(
+            parse_cli(args(&["--http"])),
+            Cli::Run(Config {
+                http: Some(DEFAULT_HTTP_ADDR.to_string()),
+            })
+        );
+        // Both spellings of an explicit address.
+        let want = Cli::Run(Config {
+            http: Some("0.0.0.0:9000".to_string()),
+        });
+        assert_eq!(parse_cli(args(&["--http", "0.0.0.0:9000"])), want);
+        assert_eq!(parse_cli(args(&["--http=0.0.0.0:9000"])), want);
+    }
+
+    /// `--http` must not swallow a following flag as its address.
+    #[test]
+    fn http_does_not_consume_the_next_flag() {
+        assert!(matches!(
+            parse_cli(args(&["--http", "--version"])),
+            Cli::Print(_)
+        ));
+        assert!(matches!(
+            parse_cli(args(&["--http", "--nope"])),
+            Cli::Reject(_)
+        ));
     }
 
     /// The bug this guards: argv was ignored, so `cmuxd --help` started a

@@ -123,6 +123,78 @@ Status reporting is per-session. A `claude` session gets a probe that reads
 `ctl list`); a session started with your own command gets no probe and no
 polling.
 
+## HTTP API
+
+The unix socket speaks a length-prefixed JSON protocol that only `cmux`
+implements, so reading a session or driving it meant writing a client. Pass
+`--http` and the same daemon is reachable over plain HTTP: a script, a browser
+or an agent can list sessions, read what is on a screen, send input and stream
+output without touching that protocol.
+
+```
+cmuxd --http                  # 127.0.0.1:7070
+cmuxd --http 127.0.0.1:9000
+cmuxd --http 127.0.0.1:0      # let the kernel pick; the daemon prints the port
+```
+
+It prints the URL on start and writes the bearer token to
+`$XDG_RUNTIME_DIR/cmux/http-token` with mode 0600:
+
+```
+cmuxd http api on http://127.0.0.1:7070
+  browser: http://127.0.0.1:7070/?token=5d8faf7a…
+  token:   /run/user/1000/cmux/http-token (mode 0600)
+```
+
+> **A session is an arbitrary command, so reaching this API is equivalent to
+> running code as the daemon's user.** It binds loopback and demands the token
+> on every request, including the browser page. Set `CMUXD_HTTP_TOKEN` to pin
+> your own. Do not bind a public interface without authenticated TLS in front.
+
+Send `Authorization: Bearer <token>`, or `?token=<token>` for browsers and
+WebSockets, neither of which can set headers.
+
+| Method | Path | Does |
+|---|---|---|
+| `GET` | `/api/health` | version, protocol, session count |
+| `GET` | `/api/sessions` | every session, ordered by id |
+| `POST` | `/api/sessions` | spawn; body `{cmd, cwd?, label?, probe?, rows?, cols?}` |
+| `GET` | `/api/sessions/{id}` | one session's info |
+| `DELETE` | `/api/sessions/{id}` | kill it |
+| `GET` | `/api/sessions/{id}/screen` | the visible grid as **plain text** |
+| `GET` | `/api/sessions/{id}/buffer` | the raw replay ring, escapes included |
+| `POST` | `/api/sessions/{id}/input` | body bytes go to the PTY verbatim |
+| `POST` | `/api/sessions/{id}/resize` | body `{rows, cols}` |
+| `GET` | `/ws/sessions/{id}` | WebSocket: binary frames out, input in |
+| `GET` | `/` | browser terminal |
+
+### From a shell
+
+```sh
+T=$(cat "$XDG_RUNTIME_DIR/cmux/http-token")
+A="Authorization: Bearer $T"
+
+curl -H "$A" localhost:7070/api/sessions
+
+curl -H "$A" -H 'Content-Type: application/json' \
+  -d '{"cmd":["python3","-q"],"label":"repl"}' \
+  localhost:7070/api/sessions
+
+curl -H "$A" --data-binary $'print(2**10)\n' localhost:7070/api/sessions/1/input
+curl -H "$A" localhost:7070/api/sessions/1/screen
+```
+
+Reach for `screen` first — it hands back the terminal as text, with no escape
+sequences to parse.
+
+### In a browser
+
+Open the URL the daemon printed. The page lists sessions, attaches to one over
+the WebSocket, forwards keystrokes and pushes the rendered size back to the PTY.
+`?session=N` opens a specific one; otherwise it attaches to the first. The
+renderer is xterm.js from a CDN, so that page needs internet even though the
+daemon does not.
+
 ## Selecting text
 
 Click and drag inside the focused tile to select claude's output. On release, the selection is copied to your system clipboard via OSC 52. Most modern terminals (kitty, ghostty, wezterm, foot, alacritty, recent gnome-terminal, iTerm2) respect OSC 52 by default.
