@@ -119,35 +119,40 @@ pub(super) fn footer_for(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The prefix is down, so every chord below is live for the next keypress.
+/// This is the moment to list them; the dashboard, where none of them do
+/// anything yet, only says how to get here.
 fn prefix_footer() -> Line<'static> {
     let mut spans = chip(" PREFIX ", theme::ACCENT_YELLOW);
     spans.push(Span::styled(
         format!(
-            "  {}=new  ↑↓=cycle  {}=detach  {}=load  {} more ",
+            "  {}=new  {}=load  ↑↓=cycle  1-9=jump  {}=rename  {}=detach  {}=sidebar  {}=more  {}=quit",
             keys::PREFIX_SPAWN.label,
-            keys::PREFIX_DETACH.label,
             keys::PREFIX_PICKER.label,
+            keys::PREFIX_RENAME.label,
+            keys::PREFIX_DETACH.label,
+            keys::PREFIX_TOGGLE_SIDEBAR.label,
             keys::PREFIX_HELP.label,
+            keys::PREFIX_QUIT.label,
         ),
         Style::default().fg(theme::FG),
     ));
     Line::from(spans)
 }
 
+/// Idle: none of the chords are live, so listing them here is noise. Say how
+/// to reach them and where the full list lives.
 fn dashboard_footer(status: &str) -> Line<'static> {
     let mut spans = chip(" DASHBOARD ", theme::ACCENT_GREEN);
     spans.push(Span::raw("  "));
     spans.extend(kbd_chip(keys::PREFIX.label));
     spans.push(Span::styled(
-        format!(
-            "  then  {}=new  {}=load  ↑↓=cycle  1-9=jump  {}=rename  {}=detach  {}=sidebar  {}=quit",
-            keys::PREFIX_SPAWN.label,
-            keys::PREFIX_PICKER.label,
-            keys::PREFIX_RENAME.label,
-            keys::PREFIX_DETACH.label,
-            keys::PREFIX_TOGGLE_SIDEBAR.label,
-            keys::PREFIX_QUIT.label,
-        ),
+        "  then a key, or  ",
+        Style::default().fg(theme::FG_MUTED),
+    ));
+    spans.extend(kbd_chip(keys::PREFIX_HELP.label));
+    spans.push(Span::styled(
+        "  for all of them",
         Style::default().fg(theme::FG_MUTED),
     ));
     if !status.is_empty() {
@@ -242,5 +247,50 @@ fn mode_footer(mode: &Mode, app: &App) -> (&'static str, String, ratatui::style:
                 theme::ACCENT_PEACH,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Chords are listed where they are live. At the dashboard none of them do
+    /// anything until the prefix is down, so listing them there is noise; once
+    /// it is down they are one keypress away and the full list belongs there.
+    #[test]
+    fn the_chord_list_lives_in_the_prefix_row_not_the_idle_one() {
+        let idle = text(&dashboard_footer(""));
+        let prefix = text(&prefix_footer());
+
+        for chord in ["=new", "=load", "=rename", "=detach", "=sidebar", "=quit"] {
+            assert!(
+                prefix.contains(chord),
+                "the prefix row should list {chord}: {prefix}"
+            );
+            assert!(
+                !idle.contains(chord),
+                "the idle row still lists {chord}, where it does nothing: {idle}"
+            );
+        }
+
+        // The idle row still has to say how to reach them.
+        assert!(idle.contains(keys::PREFIX.label), "{idle}");
+        assert!(idle.contains(keys::PREFIX_HELP.label), "{idle}");
+        assert!(
+            idle.chars().count() < prefix.chars().count(),
+            "the idle row should be the shorter of the two"
+        );
+    }
+
+    #[test]
+    fn a_status_message_is_appended_to_the_idle_row() {
+        let plain = text(&dashboard_footer(""));
+        let with_status = text(&dashboard_footer("spawned session [2]"));
+        assert!(with_status.contains("spawned session [2]"));
+        assert!(with_status.chars().count() > plain.chars().count());
     }
 }
