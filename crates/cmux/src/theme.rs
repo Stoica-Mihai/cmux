@@ -22,23 +22,17 @@ pub const ACCENT_MAGENTA: Color = Color::Rgb(0xcb, 0xa6, 0xf7);
 pub const BG_ACTIVE: Color = Color::Rgb(0x31, 0x32, 0x44);
 pub const SELECTION_BG: Color = Color::Rgb(0x58, 0x5b, 0x70);
 
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-pub fn spinner_frame(tick: u64) -> char {
-    SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize]
-}
-
 /// Single-char status badges used across the sidebar + tile chrome. Keeping
 /// them as named consts means the legend in `popups::help` and the row
 /// renderer in `dashboard` agree by reference, not by coincidence.
 pub mod glyph {
-    /// Also stands in for dormant, dimmed rather than swapped for another
-    /// glyph — the state differs in degree, not in kind.
-    pub const IDLE: &str = "○";
     pub const EXITED: &str = "✕";
-    pub const RESUMED: &str = "↺";
     /// Permission prompt waiting on user (claude blocked).
     pub const PERMISSION: &str = "⚠";
     /// Session launched with `--dangerously-skip-permissions`.
     pub const DANGER: &str = "⚠";
+    /// Running state, in the sidebar and the resume picker alike. Green while
+    /// the session runs, dimmed while it does not; the colour carries the
+    /// state, the shape stays put.
+    pub const CONNECTION: &str = "●";
 }

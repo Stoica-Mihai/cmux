@@ -7,6 +7,7 @@
 
 mod chrome;
 mod dashboard;
+pub use dashboard::SIDEBAR_W;
 mod popups;
 mod widgets;
 

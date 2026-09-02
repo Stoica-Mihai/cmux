@@ -29,7 +29,7 @@ const CTRL: KeyModifiers = KeyModifiers::CONTROL;
 pub const PREFIX: Chord = Chord {
     codes: &[KeyCode::Char('a'), KeyCode::Char('A')],
     mods: CTRL,
-    label: "Ctrl+A",
+    label: "ctrl+a",
 };
 
 // ---------------------------------------------------------------------------
@@ -112,12 +112,12 @@ pub const SCROLLBACK_DOWN: Chord = Chord {
 pub const SCROLLBACK_PAGE_UP: Chord = Chord {
     codes: &[KeyCode::PageUp, KeyCode::Char('b')],
     mods: NO_MODS,
-    label: "PgUp/b",
+    label: "pgup/b",
 };
 pub const SCROLLBACK_PAGE_DOWN: Chord = Chord {
     codes: &[KeyCode::PageDown, KeyCode::Char('f'), KeyCode::Char(' ')],
     mods: NO_MODS,
-    label: "PgDn/f/Space",
+    label: "pgdn/f/space",
 };
 pub const SCROLLBACK_TOP: Chord = Chord {
     codes: &[KeyCode::Home, KeyCode::Char('g')],
@@ -132,7 +132,7 @@ pub const SCROLLBACK_BOTTOM: Chord = Chord {
 pub const SCROLLBACK_EXIT: Chord = Chord {
     codes: &[KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')],
     mods: NO_MODS,
-    label: "q/Esc",
+    label: "q/esc",
 };
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ pub const REORDER_DOWN: Chord = Chord {
 pub const REORDER_EXIT: Chord = Chord {
     codes: &[KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')],
     mods: NO_MODS,
-    label: "Esc/Enter/q",
+    label: "esc/enter/q",
 };
 
 // ---------------------------------------------------------------------------
@@ -160,12 +160,12 @@ pub const REORDER_EXIT: Chord = Chord {
 pub const CONFIRM_YES: Chord = Chord {
     codes: &[KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter],
     mods: NO_MODS,
-    label: "y/Enter",
+    label: "y/enter",
 };
 pub const CONFIRM_NO: Chord = Chord {
     codes: &[KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc],
     mods: NO_MODS,
-    label: "n/Esc",
+    label: "n/esc",
 };
 
 // ---------------------------------------------------------------------------
@@ -184,22 +184,22 @@ pub const SPAWN_DOWN: Chord = Chord {
 pub const SPAWN_PGUP: Chord = Chord {
     codes: &[KeyCode::PageUp],
     mods: NO_MODS,
-    label: "PgUp",
+    label: "pgup",
 };
 pub const SPAWN_PGDOWN: Chord = Chord {
     codes: &[KeyCode::PageDown],
     mods: NO_MODS,
-    label: "PgDn",
+    label: "pgdn",
 };
 pub const SPAWN_HOME: Chord = Chord {
     codes: &[KeyCode::Home],
     mods: NO_MODS,
-    label: "Home",
+    label: "home",
 };
 pub const SPAWN_END: Chord = Chord {
     codes: &[KeyCode::End],
     mods: NO_MODS,
-    label: "End",
+    label: "end",
 };
 pub const SPAWN_DESCEND: Chord = Chord {
     codes: &[KeyCode::Right, KeyCode::Char('l')],
@@ -214,17 +214,17 @@ pub const SPAWN_ASCEND: Chord = Chord {
 pub const SPAWN_PICK: Chord = Chord {
     codes: &[KeyCode::Enter],
     mods: NO_MODS,
-    label: "Enter",
+    label: "enter",
 };
 pub const SPAWN_CANCEL: Chord = Chord {
     codes: &[KeyCode::Esc],
     mods: NO_MODS,
-    label: "Esc",
+    label: "esc",
 };
 pub const SPAWN_TOGGLE_DANGER: Chord = Chord {
     codes: &[KeyCode::Char(' ')],
     mods: NO_MODS,
-    label: "Space",
+    label: "space",
 };
 
 // ---------------------------------------------------------------------------
@@ -243,42 +243,42 @@ pub const PICKER_DOWN: Chord = Chord {
 pub const PICKER_PGUP: Chord = Chord {
     codes: &[KeyCode::PageUp],
     mods: NO_MODS,
-    label: "PgUp",
+    label: "pgup",
 };
 pub const PICKER_PGDOWN: Chord = Chord {
     codes: &[KeyCode::PageDown],
     mods: NO_MODS,
-    label: "PgDn",
+    label: "pgdn",
 };
 pub const PICKER_HOME: Chord = Chord {
     codes: &[KeyCode::Home],
     mods: NO_MODS,
-    label: "Home",
+    label: "home",
 };
 pub const PICKER_END: Chord = Chord {
     codes: &[KeyCode::End],
     mods: NO_MODS,
-    label: "End",
+    label: "end",
 };
 pub const PICKER_PICK: Chord = Chord {
     codes: &[KeyCode::Enter],
     mods: NO_MODS,
-    label: "Enter",
+    label: "enter",
 };
 pub const PICKER_CANCEL: Chord = Chord {
     codes: &[KeyCode::Esc],
     mods: NO_MODS,
-    label: "Esc",
+    label: "esc",
 };
 pub const PICKER_FILTER_CLEAR: Chord = Chord {
     codes: &[KeyCode::Backspace],
     mods: NO_MODS,
-    label: "Backspace",
+    label: "backspace",
 };
 pub const PICKER_TOGGLE_DANGER: Chord = Chord {
     codes: &[KeyCode::Tab],
     mods: NO_MODS,
-    label: "Tab",
+    label: "tab",
 };
 
 // ---------------------------------------------------------------------------
@@ -287,12 +287,12 @@ pub const PICKER_TOGGLE_DANGER: Chord = Chord {
 pub const RENAME_SAVE: Chord = Chord {
     codes: &[KeyCode::Enter],
     mods: NO_MODS,
-    label: "Enter",
+    label: "enter",
 };
 pub const RENAME_CANCEL: Chord = Chord {
     codes: &[KeyCode::Esc],
     mods: NO_MODS,
-    label: "Esc",
+    label: "esc",
 };
 
 pub fn encode(key: KeyEvent) -> Option<Vec<u8>> {
