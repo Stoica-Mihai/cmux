@@ -99,12 +99,17 @@ pub(super) fn titled_block(title: impl Into<String>, color: Color) -> Block<'sta
         .border_style(Style::default().fg(color))
 }
 
+/// Clamped to `area`: a popup asking for more than the terminal has would
+/// otherwise return a rect running past the buffer, and ratatui panics on the
+/// first cell outside it.
 pub(super) fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    let width = w.min(area.width);
+    let height = h.min(area.height);
     Rect {
-        x: area.x + area.width.saturating_sub(w) / 2,
-        y: area.y + area.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
     }
 }
 
