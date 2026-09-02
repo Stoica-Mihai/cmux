@@ -717,7 +717,9 @@ mod tests {
             1,
             "shortlived".into(),
             PathBuf::from("/tmp"),
-            vec!["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            // Lives briefly, so "starts alive" is not a race against a child
+            // that has already exited by the time the assertion runs.
+            vec!["/bin/sh".into(), "-c".into(), "sleep 0.4; exit 3".into()],
             ProbeKind::None,
             24,
             80,
