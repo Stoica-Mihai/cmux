@@ -1,4 +1,7 @@
-//! `Ctrl+A l` — resume past `~/.claude/projects` sessions with live preview.
+//! `Ctrl+A l` — open past `~/.claude/projects` sessions with live preview.
+//! A green dot marks a conversation claude is running in the background, which
+//! `Enter` attaches to; a dimmed dot marks one that is not running, which
+//! `Enter` resumes.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -15,6 +18,23 @@ use crate::ui::widgets::{
     collapse_cwd, pad_right, selection_bg, titled_block, truncate, viewport_window,
 };
 
+/// The picker's keys and what each does. The popup and the status bar both
+/// list them, so the pairs and their wording live here once.
+pub(in crate::ui) fn hint_text() -> String {
+    [
+        ("↑/↓", "select"),
+        ("type", "filter"),
+        (keys::PICKER_FILTER_CLEAR.label, "clear"),
+        (keys::PICKER_PICK.label, "open"),
+        (keys::PICKER_TOGGLE_DANGER.label, "danger"),
+        (keys::PICKER_CANCEL.label, "cancel"),
+    ]
+    .iter()
+    .map(|(key, action)| format!("{key}={action}"))
+    .collect::<Vec<_>>()
+    .join("  ")
+}
+
 pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
     let popup = Rect {
         x: area.x + 1,
@@ -23,10 +43,12 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
         height: area.height.saturating_sub(2),
     };
     f.render_widget(Clear, popup);
-    let block = titled_block(
-        format!(" Resume past session ({} found) ", state.items.len()),
-        Color::Magenta,
-    );
+    let count = if state.scanning {
+        "scanning...".to_string()
+    } else {
+        format!("{} found", state.items.len())
+    };
+    let block = titled_block(format!(" Resume past session ({count}) "), Color::Magenta);
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
@@ -50,17 +72,16 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, state: &PickerState) {
         state.dangerous,
         keys::PICKER_TOGGLE_DANGER.label,
     );
+    let hint = Style::default().fg(Color::DarkGray);
     f.render_widget(
-        Paragraph::new(Span::styled(
-            format!(
-                " ↑/↓ select  type to filter  {} clear  {} resume  {} toggle danger  {} cancel",
-                keys::PICKER_FILTER_CLEAR.label,
-                keys::PICKER_PICK.label,
-                keys::PICKER_TOGGLE_DANGER.label,
-                keys::PICKER_CANCEL.label,
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {}  ", hint_text()), hint),
+            Span::styled(
+                theme::glyph::CONNECTION,
+                Style::default().fg(theme::ACCENT_GREEN),
             ),
-            Style::default().fg(Color::DarkGray),
-        )),
+            Span::styled("=running", hint),
+        ])),
         vertical[4],
     );
 }
@@ -115,8 +136,19 @@ fn draw_list_and_preview(f: &mut Frame, area: Rect, state: &PickerState) {
             .get(&t.session_id)
             .cloned()
             .unwrap_or_else(|| "(loading...)".to_string());
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if let Some(origin) = state.forked_from(t) {
+            lines.push(Line::from(Span::styled(
+                format!("forked from {origin}"),
+                Style::default()
+                    .fg(theme::ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::default());
+        }
+        lines.extend(text.lines().map(|l| Line::from(l.to_string())));
         f.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(lines)
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .style(Style::default().fg(Color::Gray)),
             preview_inner,
@@ -126,19 +158,59 @@ fn draw_list_and_preview(f: &mut Frame, area: Rect, state: &PickerState) {
     draw_rows(f, list_area, state);
 }
 
+/// Age column, as `humanize_age` fills it.
+const AGE_W: usize = 4;
+/// Size column, as `format_size_bytes` fills it.
+const SIZE_W: usize = 7;
+/// Short-id column, as `short_id` fills it.
+const ID_W: usize = 8;
+/// Fork column, wide enough for its one word.
+const FORK_W: usize = 4;
+/// The row's leading pad, its connection dot and the separator after it, plus
+/// the age, size and id columns with the two spaces separating each.
+const FIXED_W: usize = 1 + 1 + 1 + 2 + AGE_W + 2 + SIZE_W + 2 + ID_W;
+
+/// Column widths shared by every row of one pass over the list.
+struct RowLayout {
+    name_w: usize,
+    fork_w: usize,
+    cwd_w: usize,
+}
+
 fn draw_rows(f: &mut Frame, list_area: Rect, state: &PickerState) {
-    const NAME_W: usize = 14;
-    let has_any_title = state.all.iter().any(|t| t.custom_title.is_some());
-    let name_block = if has_any_title { NAME_W + 2 } else { 0 };
+    const NAME_MIN: usize = 12;
+    const NAME_MAX: usize = 28;
+    let widest_name = state
+        .all
+        .iter()
+        .filter_map(|t| state.display_name(t))
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0);
+    let name_w = widest_name.clamp(NAME_MIN, NAME_MAX);
+    let name_block = if widest_name == 0 { 0 } else { name_w + 2 };
+    let any_fork = state.all.iter().any(|t| state.fork_origin(t).is_some());
+    let fork_block = if any_fork { FORK_W + 2 } else { 0 };
     let cwd_w = (list_area.width as usize)
-        .saturating_sub(32)
+        .saturating_sub(FIXED_W)
         .saturating_sub(name_block)
+        .saturating_sub(fork_block)
         .max(15);
+    let layout = RowLayout {
+        name_w: name_block.saturating_sub(2),
+        fork_w: fork_block.saturating_sub(2),
+        cwd_w,
+    };
 
     if state.items.is_empty() {
+        let msg = if state.scanning {
+            "  scanning ~/.claude/projects..."
+        } else {
+            "  (no past sessions found in ~/.claude/projects)"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  (no past sessions found in ~/.claude/projects)",
+                msg,
                 Style::default().fg(Color::DarkGray),
             ))),
             list_area,
@@ -164,39 +236,30 @@ fn draw_rows(f: &mut Frame, list_area: Rect, state: &PickerState) {
             height: 1,
         };
         row_y += 1;
-        draw_row(
-            f,
-            row_rect,
-            t,
-            i == state.selected,
-            has_any_title,
-            NAME_W,
-            cwd_w,
-        );
+        draw_row(f, row_rect, state, t, i == state.selected, &layout);
     }
 }
 
 fn draw_row(
     f: &mut Frame,
     row_rect: Rect,
+    state: &PickerState,
     t: &crate::transcripts::Transcript,
     is_sel: bool,
-    has_any_title: bool,
-    name_w: usize,
-    cwd_w: usize,
+    layout: &RowLayout,
 ) {
     if is_sel {
         selection_bg(f, row_rect);
     }
 
     let text_rect = Rect {
-        x: row_rect.x + 2,
+        x: row_rect.x + 1,
         y: row_rect.y,
-        width: row_rect.width.saturating_sub(2),
+        width: row_rect.width.saturating_sub(1),
         height: 1,
     };
     let cwd_str = collapse_cwd(&t.cwd.display().to_string());
-    let cwd_cell = pad_right(&truncate(&cwd_str, cwd_w), cwd_w);
+    let cwd_cell = pad_right(&truncate(&cwd_str, layout.cwd_w), layout.cwd_w);
     let fg = if is_sel {
         theme::BORDER_FOCUS
     } else {
@@ -209,26 +272,53 @@ fn draw_row(
     };
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    if has_any_title {
-        let (cell, style) = match &t.custom_title {
+    let connected = state.running_as(t).is_some();
+    spans.push(Span::styled(
+        theme::glyph::CONNECTION,
+        Style::default().fg(if connected {
+            theme::ACCENT_GREEN
+        } else {
+            theme::FG_DIM
+        }),
+    ));
+    spans.push(Span::raw(" "));
+    if layout.name_w > 0 {
+        let (cell, style) = match state.display_name(t) {
             Some(n) => (
-                pad_right(&truncate(n, name_w), name_w),
+                pad_right(&truncate(n, layout.name_w), layout.name_w),
                 Style::default()
                     .fg(theme::ACCENT_MAGENTA)
                     .add_modifier(Modifier::ITALIC),
             ),
-            None => (" ".repeat(name_w), Style::default().fg(theme::FG_DIM)),
+            None => (
+                " ".repeat(layout.name_w),
+                Style::default().fg(theme::FG_DIM),
+            ),
         };
         spans.push(Span::styled(cell, style));
         spans.push(Span::raw("  "));
     }
+    if layout.fork_w > 0 {
+        let cell = if state.fork_origin(t).is_some() {
+            "fork"
+        } else {
+            ""
+        };
+        spans.push(Span::styled(
+            pad_right(cell, layout.fork_w),
+            Style::default().fg(theme::ACCENT_CYAN),
+        ));
+        spans.push(Span::raw("  "));
+    }
     spans.push(Span::styled(
         format!(
-            "{}  {:>8}  {:>7}KB  {}",
+            "{}  {:>age_w$}  {:>size_w$}  {}",
             cwd_cell,
             crate::transcripts::humanize_age(t.mtime),
-            t.file_size / 1024,
-            &t.session_id[..8.min(t.session_id.len())],
+            crate::util::format_size_bytes(t.file_size),
+            crate::transcripts::short_id(&t.session_id),
+            age_w = AGE_W,
+            size_w = SIZE_W,
         ),
         row_style,
     ));

@@ -3,9 +3,21 @@ use std::time::SystemTime;
 
 use crate::util::claude_projects_dir;
 
+/// Records scanned from the head of a transcript for the recorded cwd.
+const HEAD_LINES: usize = 40;
+/// Window read from the end of a transcript for its newest records.
+const TAIL_BYTES: u64 = 256 * 1024;
+/// Marks a line that carries the session's display name.
+const TITLE_RECORD: &str = "\"custom-title\"";
+
 pub struct Transcript {
     pub session_id: String,
+    /// The transcript file itself, as found by [`scan`].
+    pub path: PathBuf,
     pub cwd: PathBuf,
+    /// Session this conversation was forked from, for a transcript that
+    /// records a `forkedFrom` origin.
+    pub forked_from: Option<String>,
     pub mtime: SystemTime,
     pub file_size: u64,
     /// Display name set via `claude --name <name>`. Stored in the first lines
@@ -13,8 +25,10 @@ pub struct Transcript {
     pub custom_title: Option<String>,
 }
 
-pub fn slug_encode(cwd: &Path) -> String {
-    cwd.display().to_string().replace('/', "-")
+/// The leading segment of a session id, as `claude agents` and the picker's
+/// id column show it.
+pub fn short_id(session_id: &str) -> &str {
+    &session_id[..8.min(session_id.len())]
 }
 
 pub fn slug_decode(dir: &Path) -> PathBuf {
@@ -55,11 +69,17 @@ pub fn scan() -> Vec<Transcript> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let (cwd, custom_title) = extract_header(&p);
+            let Header {
+                cwd,
+                custom_title,
+                forked_from,
+            } = extract_header(&p);
             let cwd = cwd.unwrap_or_else(|| slug_decode(&proj_dir));
             out.push(Transcript {
                 session_id,
+                path: p,
                 cwd,
+                forked_from,
                 mtime,
                 file_size: size,
                 custom_title,
@@ -70,46 +90,104 @@ pub fn scan() -> Vec<Transcript> {
     out
 }
 
-/// Read the early portion of a transcript and pull both the recorded cwd and
-/// the optional `--name`-supplied custom title. Both fields tend to appear in
-/// the first handful of records; scanning the same 40-line window once keeps
-/// the picker scan I/O-bound on the directory walk, not on per-file reads.
-fn extract_header(path: &Path) -> (Option<PathBuf>, Option<String>) {
+/// What [`scan`] reads out of a transcript's own records.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Header {
+    cwd: Option<PathBuf>,
+    custom_title: Option<String>,
+    forked_from: Option<String>,
+}
+
+/// Pull the recorded cwd and fork origin from the head of a transcript and the
+/// `--name`-supplied display name from its tail. `claude` re-emits the
+/// `custom-title` record as the session runs, and the last copy carries the
+/// current name; a copy inside the head window is the fallback.
+fn extract_header(path: &Path) -> Header {
+    let mut head = extract_head(path);
+    head.custom_title = tail_title(path).or(head.custom_title);
+    head
+}
+
+/// The recorded cwd, fork origin and any `custom-title` inside the first
+/// `HEAD_LINES` records.
+fn extract_head(path: &Path) -> Header {
     use std::io::{BufRead, BufReader};
+    let mut head = Header::default();
     let Ok(f) = std::fs::File::open(path) else {
-        return (None, None);
+        return head;
     };
     let reader = BufReader::new(f);
-    let mut cwd: Option<PathBuf> = None;
-    let mut title: Option<String> = None;
-    for line in reader.lines().take(40).map_while(Result::ok) {
+    for line in reader.lines().take(HEAD_LINES).map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if cwd.is_none()
+        if head.cwd.is_none()
             && let Some(c) = v.get("cwd").and_then(|x| x.as_str())
             && !c.is_empty()
         {
-            cwd = Some(PathBuf::from(c));
+            head.cwd = Some(PathBuf::from(c));
         }
-        if title.is_none()
-            && v.get("type").and_then(|x| x.as_str()) == Some("custom-title")
-            && let Some(t) = v.get("customTitle").and_then(|x| x.as_str())
-            && !t.is_empty()
-        {
-            title = Some(t.to_string());
+        if head.forked_from.is_none() {
+            head.forked_from = forked_from_of(&v);
         }
-        if cwd.is_some() && title.is_some() {
+        if head.custom_title.is_none() {
+            head.custom_title = title_of(&v);
+        }
+        if head.cwd.is_some() && head.custom_title.is_some() {
             break;
         }
     }
-    (cwd, title)
+    head
+}
+
+/// The session id a `forkedFrom` origin names.
+fn forked_from_of(v: &serde_json::Value) -> Option<String> {
+    let id = v
+        .get("forkedFrom")?
+        .get("sessionId")?
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    Some(id.to_string())
+}
+
+/// The last `custom-title` record within the final `TAIL_BYTES` of the file.
+/// A partial leading line from the seek is dropped.
+fn tail_title(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let window = size.min(TAIL_BYTES);
+    f.seek(SeekFrom::End(-(window as i64))).ok()?;
+    let mut buf = vec![0u8; window as usize];
+    f.read_exact(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let start = if window < size {
+        text.find('\n').map(|i| i + 1).unwrap_or(text.len())
+    } else {
+        0
+    };
+    text[start..]
+        .lines()
+        .rev()
+        .filter(|line| line.contains(TITLE_RECORD))
+        .find_map(|line| {
+            let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            title_of(&v)
+        })
+}
+
+/// The non-empty `customTitle` of a `custom-title` record.
+fn title_of(v: &serde_json::Value) -> Option<String> {
+    if v.get("type").and_then(|x| x.as_str()) != Some("custom-title") {
+        return None;
+    }
+    let t = v.get("customTitle").and_then(|x| x.as_str())?;
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 pub fn load_preview(path: &std::path::Path, max_lines: usize) -> String {
     use std::collections::VecDeque;
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-    const TAIL_BYTES: u64 = 256 * 1024;
     let Ok(mut f) = std::fs::File::open(path) else {
         return String::from("(unable to read transcript)");
     };
@@ -211,5 +289,9 @@ pub fn humanize_age(mtime: SystemTime) -> String {
         .duration_since(mtime)
         .unwrap_or_default()
         .as_secs();
-    crate::util::format_duration_secs(secs, " ago")
+    crate::util::format_duration_secs(secs)
 }
+
+#[cfg(test)]
+#[path = "tests/transcripts.rs"]
+mod tests;

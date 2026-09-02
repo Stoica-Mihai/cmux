@@ -64,9 +64,14 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect, spawn: &SpawnState) {
 
 fn draw_dir_list(f: &mut Frame, list_area: Rect, spawn: &SpawnState) {
     if spawn.entries.is_empty() {
+        let msg = if spawn.reading {
+            "  reading..."
+        } else {
+            "  (no subdirectories. Enter spawns here, ← goes up)"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  (no subdirectories. Enter spawns here, ← goes up)",
+                msg,
                 Style::default().fg(theme::FG_DIM),
             ))),
             list_area,
