@@ -47,38 +47,49 @@ pub struct TerminalState {
     pub proc: Processor,
 }
 
-/// Strip xterm alt-screen mode set/reset sequences so replay through a fresh
-/// Term keeps writes in the primary buffer (which has full scrollback).
-/// Targets CSI ?1049h, ?1049l, ?47h, ?47l, ?1047h, ?1047l.
+const ALT_SCREEN_MODES: [&[u8]; 3] = [b"1049", b"47", b"1047"];
+
+/// Strip xterm alt-screen mode switches so replay through a fresh Term keeps
+/// writes in the primary buffer, which is the one with scrollback. Terminfo's
+/// smcup usually sets several private modes at once, so the sequence is parsed
+/// and only the alt-screen parameters are dropped.
 pub fn strip_alt_screen(input: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let mut i = 0;
     while i < input.len() {
-        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'[' {
-            // peek forward for ? ... h/l
-            let mut j = i + 2;
-            while j < input.len() {
-                let b = input[j];
-                if b == b'h' || b == b'l' || b == b'~' || (b as char).is_alphabetic() {
-                    break;
-                }
-                j += 1;
-            }
-            if j < input.len() && (input[j] == b'h' || input[j] == b'l') {
-                let params = &input[i + 2..j];
-                let trailer = input[j];
-                if matches!(params, b"?1049" | b"?47" | b"?1047")
-                    && (trailer == b'h' || trailer == b'l')
-                {
-                    i = j + 1;
-                    continue;
-                }
-            }
+        let Some((len, params, set)) = private_mode(&input[i..]) else {
+            out.push(input[i]);
+            i += 1;
+            continue;
+        };
+        let kept: Vec<&[u8]> = params
+            .into_iter()
+            .filter(|p| !ALT_SCREEN_MODES.contains(p))
+            .collect();
+        if !kept.is_empty() {
+            out.extend_from_slice(b"\x1b[?");
+            out.extend_from_slice(&kept.join(&b';'));
+            out.push(if set { b'h' } else { b'l' });
         }
-        out.push(input[i]);
-        i += 1;
+        i += len;
     }
     out
+}
+
+/// A leading `ESC [ ? <digits>(;<digits>)* (h|l)`: its length in bytes, its
+/// parameters, and whether it sets or resets.
+fn private_mode(input: &[u8]) -> Option<(usize, Vec<&[u8]>, bool)> {
+    let rest = input.strip_prefix(b"\x1b[?")?;
+    let end = rest.iter().position(|b| *b == b'h' || *b == b'l')?;
+    let body = &rest[..end];
+    if !body.iter().all(|b| b.is_ascii_digit() || *b == b';') {
+        return None;
+    }
+    let params: Vec<&[u8]> = body.split(|b| *b == b';').collect();
+    if params.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    Some((3 + end + 1, params, rest[end] == b'h'))
 }
 
 pub fn build_scrollback(rows: u16, cols: u16, ring_bytes: &[u8]) -> TerminalState {
@@ -734,6 +745,72 @@ mod tests {
             ProtoRequest::Attach { session_id, .. } => assert_eq!(session_id, 9),
             other => panic!("expected Attach, got {other:?}"),
         }
+    }
+
+    fn stripped(input: &str) -> String {
+        String::from_utf8(strip_alt_screen(input.as_bytes())).expect("utf8")
+    }
+
+    #[test]
+    fn each_alt_screen_sequence_is_stripped_on_its_own() {
+        for seq in [
+            "\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1047h", "\x1b[?1047l",
+        ] {
+            assert_eq!(
+                stripped(&format!("a{seq}b")),
+                "ab",
+                "{seq:?} survived the strip"
+            );
+        }
+    }
+
+    /// Terminfo's smcup often sets several private modes in one sequence, so
+    /// matching the parameter list whole misses the alt-screen switch inside it.
+    /// 1048 is save-cursor, not a buffer switch, so it stays.
+    #[test]
+    fn an_alt_screen_parameter_is_stripped_out_of_a_combined_sequence() {
+        assert_eq!(stripped("a\x1b[?1047;1048;1049hb"), "a\x1b[?1048hb");
+        assert_eq!(stripped("a\x1b[?1049;47lb"), "ab");
+    }
+
+    /// Only the alt-screen parameters go; the rest of the sequence has to
+    /// survive, or replay loses bracketed paste, mouse reporting and the like.
+    #[test]
+    fn the_other_parameters_of_a_combined_sequence_survive() {
+        assert_eq!(stripped("a\x1b[?1049;2004hb"), "a\x1b[?2004hb");
+        assert_eq!(stripped("a\x1b[?1000;1049;2004lb"), "a\x1b[?1000;2004lb");
+    }
+
+    #[test]
+    fn sequences_that_are_not_alt_screen_are_left_alone() {
+        for seq in [
+            "\x1b[?25l",
+            "\x1b[?2004h",
+            "\x1b[H",
+            "\x1b[2J",
+            "\x1b[1;31m",
+            "\x1b[?10491h",
+            "\x1b[?104h",
+        ] {
+            assert_eq!(
+                stripped(&format!("a{seq}b")),
+                format!("a{seq}b"),
+                "{seq:?} was stripped but is not an alt-screen switch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_escape_at_the_end_is_kept_verbatim() {
+        for tail in ["\x1b", "\x1b[", "\x1b[?", "\x1b[?1049"] {
+            assert_eq!(stripped(&format!("a{tail}")), format!("a{tail}"));
+        }
+    }
+
+    #[test]
+    fn plain_text_passes_through_untouched() {
+        assert_eq!(stripped(""), "");
+        assert_eq!(stripped("hello\r\nworld"), "hello\r\nworld");
     }
 
     #[test]

@@ -174,4 +174,72 @@ mod tests {
         assert_eq!(outcome.status, None);
         assert_eq!(outcome.label, None);
     }
+
+    /// The other half of the same call: a quiet screen must clear attention,
+    /// not merely leave it unset, or the badge sticks once it has been raised.
+    #[test]
+    fn a_quiet_screen_clears_attention_rather_than_leaving_it_unsaid() {
+        let term = term_showing("$ cargo build\n    Finished in 4.63s");
+        let outcome = ClaudeProbe.poll(&ProbeCtx {
+            pid: None,
+            term: &term,
+        });
+        assert_eq!(
+            outcome.attention,
+            Some(false),
+            "a quiet screen should say so, not stay silent"
+        );
+    }
+
+    /// Every needle has to match, and the match is case-insensitive because
+    /// the prompt's own casing changes between claude versions.
+    #[test]
+    fn each_prompt_needle_is_detected_whatever_its_case() {
+        for needle in PROMPT_NEEDLES {
+            assert!(
+                scan_permission_prompt(&term_showing(needle)),
+                "{needle:?} was not detected"
+            );
+            assert!(
+                scan_permission_prompt(&term_showing(&needle.to_uppercase())),
+                "{needle:?} was not detected in upper case"
+            );
+        }
+    }
+
+    #[test]
+    fn a_numbered_prompt_needs_both_of_its_choices() {
+        assert!(scan_permission_prompt(&term_showing(
+            "1. Yes\n3. No thanks"
+        )));
+        assert!(
+            !scan_permission_prompt(&term_showing("2. No, not this one")),
+            "a lone no is not a prompt"
+        );
+    }
+
+    #[test]
+    fn an_empty_screen_is_not_a_prompt() {
+        assert!(!scan_permission_prompt(&term_showing("")));
+    }
+
+    #[test]
+    fn grid_text_keeps_rows_on_their_own_lines() {
+        let text = grid_text(&term_showing("first\nsecond"));
+        let lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[1], "second");
+    }
+
+    /// A wide glyph spans two cells and the second carries no character, so
+    /// emitting it would double every CJK character the probe reads.
+    #[test]
+    fn grid_text_emits_a_wide_glyph_once() {
+        let text = grid_text(&term_showing("日本"));
+        assert!(
+            text.starts_with("日本"),
+            "got {:?}",
+            &text[..12.min(text.len())]
+        );
+    }
 }

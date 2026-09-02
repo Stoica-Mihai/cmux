@@ -436,6 +436,118 @@ mod tests {
         assert!(matches!(err, FrameError::TooLarge(_)));
     }
 
+    fn info(alive: bool, exit_status: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            id: 1,
+            label: "s".into(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            cmd: vec!["bash".into()],
+            probe: ProbeKind::None,
+            rows: 24,
+            cols: 80,
+            spawned_at_ms: 1,
+            last_active_ms: 2,
+            status: SessionStatus::Unknown,
+            attention: false,
+            alive,
+            exit_status: exit_status.map(str::to_string),
+        }
+    }
+
+    /// Both states, because a client tells a finished session from a running
+    /// one by exactly these two fields.
+    #[test]
+    fn liveness_and_exit_status_survive_the_wire() {
+        for (alive, status) in [(true, None), (false, Some("exited 3"))] {
+            let sent = info(alive, status);
+            let json = serde_json::to_string(&sent).expect("encode");
+            let got: SessionInfo = serde_json::from_str(&json).expect("decode");
+            assert_eq!(got.alive, alive, "in {json}");
+            assert_eq!(got.exit_status.as_deref(), status, "in {json}");
+        }
+    }
+
+    /// The status can carry an OS error string, and a quote in it must not
+    /// break the frame it travels in.
+    #[test]
+    fn an_exit_status_holding_a_quote_round_trips() {
+        let sent = Event::SessionExited {
+            id: 7,
+            status: r#"wait failed: no such "thing""#.into(),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &sent).expect("write");
+        let got: Event = read_frame(&mut Cursor::new(buf)).expect("read");
+        match got {
+            Event::SessionExited { id, status } => {
+                assert_eq!(id, 7);
+                assert_eq!(status, r#"wait failed: no such "thing""#);
+            }
+            other => panic!("expected SessionExited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frames_written_back_to_back_read_back_in_order() {
+        let mut buf = Vec::new();
+        for id in 1..=3u64 {
+            write_frame(
+                &mut buf,
+                &Request::Detach {
+                    session_id: id,
+                    keep_session: true,
+                },
+            )
+            .expect("write");
+        }
+        let mut cur = Cursor::new(buf);
+        for want in 1..=3u64 {
+            match read_frame::<_, Request>(&mut cur).expect("read") {
+                Request::Detach { session_id, .. } => assert_eq!(session_id, want),
+                other => panic!("expected Detach, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(read_frame::<_, Request>(&mut cur), Err(FrameError::Eof)),
+            "the stream should be exhausted"
+        );
+    }
+
+    /// The read side already refuses an oversized header; the write side has to
+    /// refuse too, or the daemon emits a frame no client will accept.
+    #[test]
+    fn an_oversized_payload_is_refused_before_it_is_written() {
+        let huge = "x".repeat(MAX_FRAME_BYTES as usize + 16);
+        let mut buf = Vec::new();
+        let err = write_frame(
+            &mut buf,
+            &Event::Error {
+                request_id: None,
+                message: huge,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, FrameError::TooLarge(_)), "got {err:?}");
+        assert!(
+            buf.is_empty(),
+            "a refused frame still wrote {} bytes",
+            buf.len()
+        );
+    }
+
+    #[test]
+    fn a_payload_that_is_not_the_expected_shape_is_a_decode_error() {
+        let mut buf = Vec::new();
+        let junk = b"not json at all";
+        buf.extend_from_slice(&(junk.len() as u32).to_le_bytes());
+        buf.extend_from_slice(junk);
+        let err = read_frame::<_, Request>(&mut Cursor::new(buf)).unwrap_err();
+        assert!(
+            !matches!(err, FrameError::Eof | FrameError::TooLarge(_)),
+            "a bad payload should not look like a transport failure: {err:?}"
+        );
+    }
+
     #[test]
     fn claude_command_matches_the_flags_it_is_given() {
         assert_eq!(claude_command(false, None), vec!["claude"]);

@@ -437,4 +437,162 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "X");
         assert_eq!(buf[(0, 0)].fg, RColor::Red);
     }
+
+    fn sel(anchor: (u16, u16), tip: (u16, u16)) -> TileSelection {
+        TileSelection { anchor, tip }
+    }
+
+    /// A drag has two directions and one of them is the mirror of the other,
+    /// so both have to agree on the same ordered range.
+    #[test]
+    fn a_selection_normalizes_the_same_dragged_either_way() {
+        let forward = sel((0, 2), (3, 5)).normalized();
+        let backward = sel((3, 5), (0, 2)).normalized();
+        assert_eq!(forward, (0, 2, 3, 5));
+        assert_eq!(backward, forward, "dragging back should give the same range");
+    }
+
+    #[test]
+    fn a_selection_within_one_row_covers_only_that_span() {
+        let s = sel((1, 2), (1, 4));
+        assert!(!s.contains(1, 1), "col 1 is before the start");
+        assert!(s.contains(1, 2), "the start col is included");
+        assert!(s.contains(1, 4), "the end col is included");
+        assert!(!s.contains(1, 5), "col 5 is past the end");
+        assert!(!s.contains(0, 3), "a different row is not covered");
+        assert!(!s.contains(2, 3));
+    }
+
+    #[test]
+    fn a_multi_row_selection_covers_the_ends_partially_and_the_middle_whole() {
+        let s = sel((1, 3), (3, 2));
+        assert!(!s.contains(1, 2), "before the anchor on the first row");
+        assert!(s.contains(1, 3));
+        assert!(s.contains(1, 99), "the first row runs to its end");
+        assert!(s.contains(2, 0) && s.contains(2, 99), "middle rows are whole");
+        assert!(s.contains(3, 2));
+        assert!(!s.contains(3, 3), "past the tip on the last row");
+        assert!(!s.contains(0, 5) && !s.contains(4, 0));
+    }
+
+    #[test]
+    fn extracting_one_row_gives_just_that_span() {
+        let term = build(3, 12, b"hello world\r\nsecond line");
+        assert_eq!(extract_selection(&term, sel((0, 0), (0, 4))), "hello");
+        assert_eq!(extract_selection(&term, sel((0, 6), (0, 10))), "world");
+    }
+
+    #[test]
+    fn extracting_across_rows_joins_them_with_a_newline() {
+        let term = build(3, 12, b"hello world\r\nsecond line");
+        assert_eq!(
+            extract_selection(&term, sel((0, 6), (1, 5))),
+            "world\nsecond"
+        );
+    }
+
+    #[test]
+    fn extracting_a_backwards_drag_gives_the_same_text() {
+        let term = build(3, 12, b"hello world\r\nsecond line");
+        assert_eq!(
+            extract_selection(&term, sel((1, 5), (0, 6))),
+            extract_selection(&term, sel((0, 6), (1, 5))),
+            "the text should not depend on which way it was dragged"
+        );
+    }
+
+    /// A wide glyph occupies two cells; the second holds no character of its
+    /// own, so emitting it would double the glyph.
+    #[test]
+    fn a_wide_glyph_is_emitted_once() {
+        let term = build(1, 10, "日本".as_bytes());
+        assert_eq!(extract_selection(&term, sel((0, 0), (0, 9))), "日本");
+    }
+
+    #[test]
+    fn trailing_blanks_are_trimmed_off_each_line() {
+        let term = build(2, 20, b"ab\r\ncd");
+        assert_eq!(extract_selection(&term, sel((0, 0), (1, 19))), "ab\ncd");
+    }
+
+    #[test]
+    fn an_empty_region_extracts_to_nothing() {
+        let term = build(3, 10, b"");
+        assert_eq!(extract_selection(&term, sel((0, 0), (2, 9))).trim(), "");
+    }
+
+    /// Indices 0-7 are the normal colours and 8-15 their bright counterparts,
+    /// so a table off by eight silently swaps every colour in the UI.
+    #[test]
+    fn the_low_palette_indices_map_to_their_named_colours() {
+        assert_eq!(named_to_ratatui(indexed_low_to_named(0)), RColor::Black);
+        assert_eq!(named_to_ratatui(indexed_low_to_named(1)), RColor::Red);
+        assert_eq!(named_to_ratatui(indexed_low_to_named(7)), RColor::Gray);
+        assert_eq!(named_to_ratatui(indexed_low_to_named(8)), RColor::DarkGray);
+        assert_eq!(named_to_ratatui(indexed_low_to_named(9)), RColor::LightRed);
+        assert_eq!(named_to_ratatui(indexed_low_to_named(15)), RColor::White);
+    }
+
+    #[test]
+    fn a_bright_sgr_renders_brighter_than_its_normal_pair() {
+        let normal = build(1, 3, b"\x1b[31mX");
+        let bright = build(1, 3, b"\x1b[91mX");
+        let render = |t: &Term<VoidListener>| {
+            let area = Rect::new(0, 0, 3, 1);
+            let mut buf = Buffer::empty(area);
+            TermWidget::new(t).render(area, &mut buf);
+            buf[(0, 0)].fg
+        };
+        assert_eq!(render(&normal), RColor::Red);
+        assert_eq!(render(&bright), RColor::LightRed);
+    }
+
+    #[test]
+    fn a_true_colour_sgr_survives_as_rgb() {
+        let term = build(1, 3, b"\x1b[38;2;18;52;86mX");
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        TermWidget::new(&term).render(area, &mut buf);
+        assert_eq!(buf[(0, 0)].fg, RColor::Rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn rendering_into_a_zero_sized_area_draws_nothing() {
+        let term = build(3, 10, b"hello");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
+        TermWidget::new(&term).render(Rect::new(0, 0, 0, 0), &mut buf);
+        TermWidget::new(&term).render(Rect::new(0, 0, 10, 0), &mut buf);
+        TermWidget::new(&term).render(Rect::new(0, 0, 0, 3), &mut buf);
+        assert_eq!(buf[(0, 0)].symbol(), " ", "nothing should have been drawn");
+    }
+
+    #[test]
+    fn rendering_into_an_area_smaller_than_the_grid_clips() {
+        let term = build(5, 20, b"aaaaaaaaaa\r\nbbbbbbbbbb\r\ncccccccccc");
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        TermWidget::new(&term).render(area, &mut buf);
+        assert_eq!(buf[(0, 0)].symbol(), "a");
+        assert_eq!(buf[(0, 1)].symbol(), "b");
+    }
+
+    #[test]
+    fn a_selection_highlight_only_covers_the_selected_cells() {
+        let term = build(1, 6, b"abcdef");
+        let area = Rect::new(0, 0, 6, 1);
+        let mut plain = Buffer::empty(area);
+        TermWidget::new(&term).render(area, &mut plain);
+        let mut marked = Buffer::empty(area);
+        TermWidget::new(&term)
+            .with_selection(Some(sel((0, 1), (0, 3))))
+            .render(area, &mut marked);
+
+        assert_eq!(plain[(0, 0)].bg, marked[(0, 0)].bg, "col 0 is not selected");
+        assert_ne!(
+            plain[(2, 0)].bg,
+            marked[(2, 0)].bg,
+            "col 2 is selected and should look different"
+        );
+        assert_eq!(plain[(5, 0)].bg, marked[(5, 0)].bg, "col 5 is not selected");
+    }
 }

@@ -110,3 +110,112 @@ pub(in crate::ui) fn draw(f: &mut Frame, area: Rect) {
         inner,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::popups::harness::{
+        assert_inside, assert_legible, painted_bounds, render, text, try_render,
+    };
+    use ratatui::buffer::Buffer;
+
+    const MODAL_BG: Color = Color::Rgb(0x18, 0x14, 0x18);
+    const SHADOW_BG: Color = Color::Rgb(0x05, 0x05, 0x09);
+    const WASH_BG: Color = Color::Rgb(0x11, 0x11, 0x18);
+
+    fn cells_with_bg(buf: &Buffer, bg: Color) -> Vec<(u16, u16)> {
+        let mut out = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].bg == bg {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn it_names_what_died_and_what_survives() {
+        let buf = render(80, 24, |f| draw(f, Rect::new(0, 0, 80, 24)));
+        let out = text(&buf);
+
+        for needle in [
+            "Daemon disconnected",
+            "cmuxd",
+            "is no longer responding",
+            "Sessions are retained on disk.",
+            "Restart cmuxd and reconnect to resume them.",
+            "any key",
+            "to dismiss",
+        ] {
+            assert!(out.contains(needle), "the modal lacks {needle:?}:\n{out}");
+        }
+        assert_legible(&buf, "daemon_lost");
+    }
+
+    #[test]
+    fn the_screen_behind_the_modal_is_washed_out() {
+        let buf = render(80, 24, |f| draw(f, Rect::new(0, 0, 80, 24)));
+        let corner = &buf[(0u16, 0u16)];
+
+        assert_eq!(
+            corner.bg, WASH_BG,
+            "the chrome behind the modal is not dimmed, so the frozen session reads as live"
+        );
+        assert!(
+            corner.modifier.contains(Modifier::DIM),
+            "the wash carries no DIM modifier: {:?}",
+            corner.modifier
+        );
+    }
+
+    #[test]
+    fn the_shadow_sits_one_cell_below_and_right_of_the_modal() {
+        let buf = render(80, 24, |f| draw(f, Rect::new(0, 0, 80, 24)));
+        let modal = cells_with_bg(&buf, MODAL_BG);
+        let shadow = cells_with_bg(&buf, SHADOW_BG);
+
+        assert!(!modal.is_empty(), "the modal never drew");
+        assert!(!shadow.is_empty(), "the drop shadow never drew");
+
+        let right = |cells: &[(u16, u16)]| cells.iter().map(|(x, _)| *x).max().unwrap();
+        let bottom = |cells: &[(u16, u16)]| cells.iter().map(|(_, y)| *y).max().unwrap();
+
+        assert_eq!(
+            right(&shadow),
+            right(&modal) + 1,
+            "the shadow is not offset one column right of the modal"
+        );
+        assert_eq!(
+            bottom(&shadow),
+            bottom(&modal) + 1,
+            "the shadow is not offset one row below the modal"
+        );
+    }
+
+    #[test]
+    fn it_stays_inside_the_rect_it_is_handed() {
+        let area = Rect::new(10, 5, 80, 20);
+        let buf = render(100, 30, |f| draw(f, area));
+        assert_inside(&buf, area, "the daemon-lost modal");
+    }
+
+    #[test]
+    fn it_survives_a_terminal_smaller_than_the_modal() {
+        let small = try_render(20, 5, |f| draw(f, Rect::new(0, 0, 20, 5)))
+            .unwrap_or_else(|e| panic!("the daemon-lost modal dies in a 20x5 terminal: {e}"));
+        assert!(
+            text(&small).contains("Daemon"),
+            "at 20x5 the modal drew nothing readable:\n{}",
+            text(&small)
+        );
+
+        let tiny = try_render(1, 1, |f| draw(f, Rect::new(0, 0, 1, 1)))
+            .unwrap_or_else(|e| panic!("the daemon-lost modal dies in a 1x1 terminal: {e}"));
+        assert!(
+            painted_bounds(&tiny).is_some(),
+            "at 1x1 the modal drew nothing at all"
+        );
+    }
+}

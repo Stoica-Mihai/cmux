@@ -42,3 +42,165 @@ pub mod glyph {
     /// Session launched with `--dangerously-skip-permissions`.
     pub const DANGER: &str = "⚠";
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assert every pair in `named` differs, naming both sides on failure.
+    fn all_distinct<T: PartialEq + std::fmt::Debug>(named: &[(&str, T)], why: &str) {
+        for (i, (a_name, a)) in named.iter().enumerate() {
+            for (b_name, b) in &named[i + 1..] {
+                assert_ne!(a, b, "{a_name} and {b_name} are the same value; {why}");
+            }
+        }
+    }
+
+    #[test]
+    fn spinner_frame_advances_on_every_tick() {
+        let cycle = SPINNER_FRAMES.len() as u64;
+        for tick in 0..cycle {
+            assert_ne!(
+                spinner_frame(tick),
+                spinner_frame(tick + 1),
+                "tick {tick} and tick {} draw the same glyph, so the spinner stalls",
+                tick + 1
+            );
+        }
+    }
+
+    #[test]
+    fn spinner_frame_uses_every_frame_once_per_cycle() {
+        let cycle = SPINNER_FRAMES.len();
+        assert_eq!(cycle, 10, "the spinner cycle length changed");
+
+        let seen: Vec<char> = (0..cycle as u64).map(spinner_frame).collect();
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            cycle,
+            "one cycle drew {seen:?}, which repeats a frame"
+        );
+        assert_eq!(
+            seen[0], SPINNER_FRAMES[0],
+            "tick 0 should draw the first frame"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_wraps_back_to_the_first_frame() {
+        let cycle = SPINNER_FRAMES.len() as u64;
+        assert_eq!(
+            spinner_frame(cycle),
+            spinner_frame(0),
+            "tick {cycle} should wrap to the first frame"
+        );
+        assert_eq!(
+            spinner_frame(cycle * 3 + 4),
+            spinner_frame(4),
+            "a tick several cycles in should land on the same frame as its remainder"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_wraps_a_large_tick_without_panicking() {
+        let cycle = SPINNER_FRAMES.len() as u64;
+        assert_eq!(
+            spinner_frame(u64::MAX),
+            spinner_frame(u64::MAX % cycle),
+            "a large tick did not wrap onto its remainder"
+        );
+        assert_eq!(
+            spinner_frame(1_000_003),
+            spinner_frame(3),
+            "tick 1000003 should draw the same frame as tick 3"
+        );
+    }
+
+    #[test]
+    fn tile_border_states_never_share_a_colour() {
+        all_distinct(
+            &[
+                ("BORDER_IDLE", BORDER_IDLE),
+                ("BORDER_FOCUS", BORDER_FOCUS),
+                ("BORDER_DEAD", BORDER_DEAD),
+                ("ACCENT_MAGENTA", ACCENT_MAGENTA),
+            ],
+            "a tile border is the only cue for idle, focused, dead and zoomed",
+        );
+    }
+
+    #[test]
+    fn the_attention_pulse_alternates_two_colours() {
+        assert_ne!(
+            BORDER_DEAD, ACCENT_RED_DIM,
+            "the attention border pulses between these two, so equal values leave it static"
+        );
+    }
+
+    #[test]
+    fn sidebar_badge_colours_never_collide() {
+        all_distinct(
+            &[
+                ("ACCENT_RED", ACCENT_RED),
+                ("ACCENT_GREEN", ACCENT_GREEN),
+                ("ACCENT_CYAN", ACCENT_CYAN),
+                ("ACCENT_YELLOW", ACCENT_YELLOW),
+                ("FG_DIM", FG_DIM),
+            ],
+            "idle, recent and dormant all draw the same glyph, so colour is the only cue",
+        );
+    }
+
+    #[test]
+    fn text_weights_never_collide() {
+        all_distinct(
+            &[("FG", FG), ("FG_DIM", FG_DIM), ("FG_MUTED", FG_MUTED)],
+            "a sidebar row stacks all three weights on consecutive lines",
+        );
+    }
+
+    #[test]
+    fn selected_text_stays_visible_against_its_background() {
+        assert_ne!(
+            FG, SELECTION_BG,
+            "a selected cell with a Reset foreground draws FG on SELECTION_BG"
+        );
+        assert_ne!(FG, BG_ACTIVE, "a highlighted row draws FG on BG_ACTIVE");
+    }
+
+    /// `glyph::DANGER` is left out: it shares its symbol with `PERMISSION` by
+    /// design and never renders in the badge column.
+    #[test]
+    fn legend_glyphs_never_collide() {
+        all_distinct(
+            &[
+                ("glyph::IDLE", glyph::IDLE),
+                ("glyph::EXITED", glyph::EXITED),
+                ("glyph::RESUMED", glyph::RESUMED),
+                ("glyph::PERMISSION", glyph::PERMISSION),
+            ],
+            "the help legend lists these four as separate sidebar states",
+        );
+    }
+
+    #[test]
+    fn no_spinner_frame_looks_like_a_status_glyph() {
+        for (i, frame) in SPINNER_FRAMES.iter().enumerate() {
+            let drawn = frame.to_string();
+            for (name, glyph) in [
+                ("glyph::IDLE", glyph::IDLE),
+                ("glyph::EXITED", glyph::EXITED),
+                ("glyph::RESUMED", glyph::RESUMED),
+                ("glyph::PERMISSION", glyph::PERMISSION),
+            ] {
+                assert_ne!(
+                    drawn, glyph,
+                    "spinner frame {i} draws {name}, so a busy session reads as that state"
+                );
+            }
+        }
+    }
+}
