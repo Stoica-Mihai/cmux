@@ -1,6 +1,8 @@
 mod app;
+mod claude_sessions;
 mod client;
 mod connect_mode;
+mod copy_buffer;
 mod keys;
 mod persist;
 mod session;
@@ -45,6 +47,7 @@ fn run_connect_mode(http: Option<&str>) -> Result<()> {
         use std::io::Write;
         let mut out = stdout();
         let _ = out.write_all(b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        let _ = out.flush();
     }
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
@@ -64,9 +67,7 @@ fn run_with_daemon(
     app.daemon = Some(handle.clone());
 
     // Adopt every existing daemon session into the sidebar.
-    let (term_rows, term_cols) = app.term_size;
-    let main_cols = term_cols.saturating_sub(32).saturating_sub(2).max(10);
-    let main_rows = term_rows.saturating_sub(3).max(4);
+    let (main_rows, main_cols) = tile_size(&app);
     let adopted = !infos.is_empty();
     for info in infos {
         let _ = app.adopt_daemon_session(info, &handle, main_rows, main_cols);
@@ -94,11 +95,34 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut app: App,
 ) -> Result<()> {
-    const HEARTBEAT_MS: u64 = 250;
-    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
-
     let debug = util::debug_enabled();
     let mut tile_sizes: ui::TileSizes = Vec::new();
+
+    let result = drive(terminal, &mut app, debug, &mut tile_sizes);
+
+    // Teardown runs whatever ended the loop. An error return used to skip it,
+    // so a draw or input failure left daemon sessions unsubscribed and the
+    // session list unsaved.
+    if app.daemon.is_some() {
+        for s in app.sessions.iter_mut() {
+            s.detach_keep();
+        }
+    }
+    if app.persist_dirty {
+        flush_persist(&app);
+    }
+    result
+}
+
+/// The event loop proper. Any error here still gets [`event_loop`]'s teardown.
+fn drive(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    debug: bool,
+    tile_sizes: &mut ui::TileSizes,
+) -> Result<()> {
+    const HEARTBEAT_MS: u64 = 250;
+    const PERSIST_DEBOUNCE_MS: u64 = 2_000;
     let mut last_draw_ms: u64 = 0;
     let mut last_persist_ms: u64 = util::now_ms();
 
@@ -107,10 +131,24 @@ fn event_loop(
         let now = util::now_ms();
 
         if app.persist_dirty && now.saturating_sub(last_persist_ms) >= PERSIST_DEBOUNCE_MS {
-            flush_persist(&app);
+            flush_persist(app);
             app.persist_dirty = false;
             last_persist_ms = now;
         }
+
+        // Both browsers read the filesystem on a worker thread; take whatever
+        // has landed.
+        let arrived = match &mut app.mode {
+            Mode::Picker(p) => p.poll(),
+            Mode::Spawn(s) => s.poll(),
+            _ => false,
+        };
+        if arrived {
+            app.needs_redraw = true;
+        }
+
+        drive_edge_scroll(app, now, tile_area_height(app));
+        stitch_scrolls(app, now);
 
         let any_session_dirty = app
             .sessions
@@ -124,19 +162,21 @@ fn event_loop(
         }
         if app.needs_redraw || any_session_dirty || now.saturating_sub(last_draw_ms) >= HEARTBEAT_MS
         {
+            project_selection(app);
             app.render_tick = app.render_tick.wrapping_add(1);
-            terminal.draw(|f| ui::draw(f, &mut app, &mut tile_sizes))?;
+            terminal.draw(|f| ui::draw(f, app, tile_sizes))?;
             for (idx, rows, cols) in tile_sizes.drain(..) {
                 if let Some(s) = app.sessions.get_mut(idx) {
                     let _ = s.resize(rows.max(2), cols.max(4));
                 }
             }
+            paint_hyperlinks(app);
             app.needs_redraw = false;
             last_draw_ms = now;
         }
 
         if event::poll(Duration::from_millis(40))? {
-            dispatch_event(&mut app, event::read()?, debug)?;
+            dispatch_event(app, event::read()?, debug)?;
         }
 
         if app.should_quit {
@@ -154,16 +194,187 @@ fn event_loop(
             app.needs_redraw = true;
         }
     }
-
-    if app.daemon.is_some() {
-        for s in app.sessions.iter_mut() {
-            s.detach_keep();
-        }
-    }
-    if app.persist_dirty {
-        flush_persist(&app);
-    }
     Ok(())
+}
+
+/// How tall the focused tile is, for a wheel report's coordinates.
+fn tile_area_height(app: &App) -> ratatui::layout::Rect {
+    app.last_tile_area.unwrap_or(ratatui::layout::Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    })
+}
+
+/// Keep scrolling while a drag is held against an edge. A pointer held still
+/// sends no further events, so the repeat runs here rather than on motion.
+fn drive_edge_scroll(app: &mut App, now: u64, tile: ratatui::layout::Rect) {
+    /// One scroll per this many milliseconds while the edge is held.
+    const EDGE_SCROLL_MS: u64 = 120;
+
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
+    let Some(up) = s.drag_edge else {
+        return;
+    };
+    if s.stitch.is_some() || now.saturating_sub(s.last_edge_scroll_ms) < EDGE_SCROLL_MS {
+        return;
+    }
+    let Some(seq) = wheel_sequence(s, up, tile) else {
+        return;
+    };
+    if s.write(&seq).is_ok() {
+        s.stitch = Some(session::StitchWait {
+            sent_ms: now,
+            answered: false,
+        });
+        s.last_edge_scroll_ms = now;
+    }
+}
+
+/// Take the repaint a scroll asked for. The child redraws asynchronously, so
+/// this waits for a frame in which nothing arrived: stitching a half-drawn
+/// screen would match against rows that are about to change.
+fn stitch_scrolls(app: &mut App, now: u64) {
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
+    let Some(wait) = s.stitch else {
+        return;
+    };
+    let arriving = s.dirty.load(std::sync::atomic::Ordering::Relaxed);
+    if arriving {
+        // The repaint has started. Wait for the frame after it stops.
+        s.stitch = Some(session::StitchWait {
+            answered: true,
+            ..wait
+        });
+        return;
+    }
+    if !wait.answered {
+        /// A child that ignores the wheel never answers, and the drag must
+        /// not wait on it for ever.
+        const ANSWER_TIMEOUT_MS: u64 = 400;
+        if now.saturating_sub(wait.sent_ms) >= ANSWER_TIMEOUT_MS {
+            s.stitch = None;
+        }
+        return;
+    }
+    let stitched = match (&mut s.copy, &s.scrollback) {
+        (Some(buf), Some(sb)) => buf.stitch_term(&sb.term),
+        (Some(buf), None) => match s.parser.lock() {
+            Ok(p) => buf.stitch_term(&p.term),
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    s.stitch = None;
+    if let Some(prepended) = stitched {
+        if let (Some(buf), Some(drag)) = (&s.copy, &mut s.drag) {
+            // Rows added at the front shift every line index the drag holds.
+            drag.anchor.0 += prepended;
+            drag.tip.0 += prepended;
+            // The tip then follows the edge the drag is held against, so the
+            // selection keeps growing while the button is down. A trim can
+            // have dropped chrome the anchor was sitting on, so both ends
+            // stay inside what the buffer actually holds.
+            let last = buf.len().saturating_sub(1);
+            let rows = s.size.0;
+            let below = drag.tip.0 >= drag.anchor.0;
+            drag.tip = if below {
+                (
+                    (buf.top() + rows.saturating_sub(1) as usize).min(last),
+                    drag.tip.1,
+                )
+            } else {
+                (buf.top(), drag.tip.1)
+            };
+            drag.anchor.0 = drag.anchor.0.min(last);
+        }
+        app.needs_redraw = true;
+    }
+}
+
+/// Paint the drag onto whatever is on screen now. The selection lives in
+/// buffer lines; the highlight needs viewport rows, and the two part company
+/// the moment the child scrolls.
+fn project_selection(app: &mut App) {
+    let Some(s) = app.sessions.get_mut(app.focus) else {
+        return;
+    };
+    let (Some(buf), Some(drag)) = (&s.copy, &s.drag) else {
+        return;
+    };
+    if drag.anchor == drag.tip {
+        s.selection = None;
+        return;
+    }
+    let rows = s.size.0;
+    let (lo, hi) = if drag.anchor <= drag.tip {
+        (drag.anchor, drag.tip)
+    } else {
+        (drag.tip, drag.anchor)
+    };
+    // A line scrolled off the top selects from the first visible row, and one
+    // past the bottom to the last: the part on screen is highlighted, and the
+    // rest is still in the buffer for the copy.
+    let last_line = buf.len().saturating_sub(1);
+    let (lo, hi) = ((lo.0.min(last_line), lo.1), (hi.0.min(last_line), hi.1));
+    let top_row = buf.viewport_row(lo.0, rows).unwrap_or(0);
+    let top_col = if buf.viewport_row(lo.0, rows).is_some() {
+        lo.1
+    } else {
+        0
+    };
+    let bottom_row = buf
+        .viewport_row(hi.0, rows)
+        .unwrap_or_else(|| rows.saturating_sub(1));
+    let bottom_col = if buf.viewport_row(hi.0, rows).is_some() {
+        hi.1
+    } else {
+        s.size.1.saturating_sub(1)
+    };
+    s.selection = Some(term_render::TileSelection {
+        anchor: (top_row, top_col),
+        tip: (bottom_row, bottom_col),
+    });
+}
+
+/// Wrap the focused tile's OSC 8 links onto the frame just drawn. ratatui
+/// cannot carry a hyperlink through its buffer, so the links are painted over
+/// the cells it already placed. A popup covering the tile skips the pass.
+fn paint_hyperlinks(app: &App) {
+    use std::io::Write;
+    let covered = matches!(
+        app.mode,
+        Mode::Spawn(_) | Mode::Rename(_) | Mode::Picker(_) | Mode::ConfirmDetach(_) | Mode::Help
+    ) || app.daemon_lost;
+    if covered {
+        return;
+    }
+    let (Some(area), Some(session)) = (app.last_tile_area, app.sessions.get(app.focus)) else {
+        return;
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let painted = match &session.scrollback {
+        Some(sb) => term_render::emit_hyperlinks(&sb.term, area, &mut buf),
+        None => match session.parser.lock() {
+            Ok(p) => term_render::emit_hyperlinks(&p.term, area, &mut buf),
+            Err(_) => return,
+        },
+    };
+    if painted.is_err() || buf.is_empty() {
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    // Save and restore the cursor around the overdraw, so the frame ratatui
+    // just positioned is left as it was.
+    let _ = out.write_all(b"\x1b7");
+    let _ = out.write_all(&buf);
+    let _ = out.write_all(b"\x1b8");
+    let _ = out.flush();
 }
 
 fn dispatch_event(app: &mut App, ev: Event, debug: bool) -> Result<()> {
@@ -319,7 +530,7 @@ fn run_ctl(cmd: CtlCmd) -> Result<()> {
             }
             let (cmd, probe) = if cmd.is_empty() {
                 (
-                    cmux_proto::claude_command(dangerous, None),
+                    cmux_proto::claude_command(dangerous, cmux_proto::Launch::New),
                     cmux_proto::ProbeKind::Claude {
                         dangerous,
                         resume_id: None,
@@ -422,17 +633,34 @@ fn should_pin_label(ps: &persist::PersistedSession) -> bool {
 }
 
 fn restore_saved(app: &mut App, saved: Vec<persist::PersistedSession>) {
+    let mut failed: Vec<String> = Vec::new();
     for ps in saved {
         let label = (!ps.label.is_empty()).then(|| ps.label.clone());
-        let res = app.restore_session(ps.cwd.clone(), ps.dangerous, ps.resume_id.clone(), label);
-        if res.is_ok()
-            && let Some(s) = app.sessions.last_mut()
-        {
-            s.manually_renamed = ps.manually_renamed;
-            if should_pin_label(&ps) {
-                s.set_label(ps.label);
+        let name = if ps.label.is_empty() {
+            ps.cwd.display().to_string()
+        } else {
+            ps.label.clone()
+        };
+        match app.restore_session(ps.cwd.clone(), ps.dangerous, ps.resume_id.clone(), label) {
+            Ok(()) => {
+                if let Some(s) = app.sessions.last_mut() {
+                    s.manually_renamed = ps.manually_renamed;
+                    if should_pin_label(&ps) {
+                        s.set_label(ps.label);
+                    }
+                }
             }
+            // A session that cannot come back leaves the list silently
+            // shorter than the one that was saved, so say which and why.
+            Err(e) => failed.push(format!("{name}: {e:#}")),
         }
+    }
+    if !failed.is_empty() {
+        app.status = format!(
+            "{} session(s) did not restore - {}",
+            failed.len(),
+            failed.join("; ")
+        );
     }
 }
 
@@ -480,7 +708,10 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
 
     match me.kind {
         MouseEventKind::Down(MouseButton::Left) => mouse_press(app, me, tile, inside),
-        MouseEventKind::Drag(MouseButton::Left) if inside => mouse_drag(app, me, tile),
+        // Not gated on `inside`: a drag that leaves the tile used to stop
+        // updating the tip, freezing the selection wherever the pointer
+        // crossed the edge instead of extending it to the edge.
+        MouseEventKind::Drag(MouseButton::Left) => mouse_drag(app, me, tile),
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             mouse_wheel(app, me, tile)
         }
@@ -495,27 +726,119 @@ fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, insid
     };
     let had_selection = s.selection.is_some();
     s.selection = None;
+    s.drag = None;
+    s.copy = None;
+    s.stitch = None;
+    s.drag_edge = None;
     s.mouse_down_at = inside.then(|| (me.row - tile.y, me.column - tile.x));
+
+    // Start collecting from what is on screen. A drag that never reaches an
+    // edge only ever reads this one screen; one that does gets the rows the
+    // child reveals stitched on.
+    if let Some((row, col)) = s.mouse_down_at {
+        let screen = match &s.scrollback {
+            Some(sb) => Some(copy_buffer::CopyBuffer::capture(&sb.term, s.size)),
+            None => s
+                .parser
+                .lock()
+                .ok()
+                .map(|p| copy_buffer::CopyBuffer::capture(&p.term, s.size)),
+        };
+        if let Some(buf) = screen
+            && let Some(line) = buf.line_at(row)
+        {
+            s.drag = Some(session::DragRange {
+                anchor: (line, col),
+                tip: (line, col),
+            });
+            s.copy = Some(buf);
+        }
+    }
     if had_selection {
         app.needs_redraw = true;
     }
+}
+
+/// A pointer position as a cell inside the tile, clamped to its edges. A
+/// pointer dragged past an edge selects up to that edge rather than freezing
+/// the selection where it crossed. `None` for a tile with no area.
+fn tile_cell(row: u16, col: u16, tile: ratatui::layout::Rect) -> Option<(u16, u16)> {
+    if tile.height == 0 || tile.width == 0 {
+        return None;
+    }
+    Some((
+        row.clamp(tile.y, tile.y + tile.height - 1) - tile.y,
+        col.clamp(tile.x, tile.x + tile.width - 1) - tile.x,
+    ))
 }
 
 fn mouse_drag(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
     let Some(s) = app.sessions.get_mut(app.focus) else {
         return;
     };
-    let Some(anchor) = s.mouse_down_at else {
+    if s.mouse_down_at.is_none() {
+        return;
+    }
+    let Some((row, col)) = tile_cell(me.row, me.column, tile) else {
         return;
     };
-    let row = me.row - tile.y;
-    let col = me.column - tile.x;
-    let sel = s
-        .selection
-        .get_or_insert_with(|| term_render::TileSelection::new(anchor.0, anchor.1));
-    sel.anchor = anchor;
-    sel.tip = (row, col);
+
+    // A resize rewraps everything, so the rows collected at the old width no
+    // longer say what is on screen.
+    if s.copy.as_ref().is_some_and(|b| b.size() != s.size) {
+        s.copy = None;
+        s.drag = None;
+        s.selection = None;
+        s.stitch = None;
+        return;
+    }
+
+    // Past an edge: ask the child to scroll, so the drag keeps going past
+    // what one screen holds. The rows it reveals are stitched on the next
+    // frame the screen is settled.
+    let past_top = me.row < tile.y;
+    let past_bottom = me.row >= tile.y + tile.height;
+    s.drag_edge = if past_top {
+        Some(true)
+    } else if past_bottom {
+        Some(false)
+    } else {
+        None
+    };
+
+    if let Some(buf) = &s.copy
+        && let Some(line) = buf.line_at(row)
+        && let Some(drag) = &mut s.drag
+    {
+        drag.tip = (line, col);
+    }
     app.needs_redraw = true;
+}
+
+/// A wheel event for the child, in whichever encoding it turned on. `None`
+/// when it is not reading the mouse at all, in which case there is nothing to
+/// ask it to scroll.
+fn wheel_sequence(s: &session::Session, up: bool, tile: ratatui::layout::Rect) -> Option<Vec<u8>> {
+    use alacritty_terminal::term::TermMode;
+    let mode = s.parser.lock().ok().map(|p| *p.term.mode())?;
+    let col = tile.width / 2 + 1;
+    let row = tile.height / 2 + 1;
+    if mode.intersects(TermMode::SGR_MOUSE) {
+        let btn = if up { 64 } else { 65 };
+        return Some(format!("\x1b[<{};{};{}M", btn, col, row).into_bytes());
+    }
+    if mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION) {
+        let btn = if up { 64u8 } else { 65u8 };
+        return Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            btn + 32,
+            (col as u8).saturating_add(32),
+            (row as u8).saturating_add(32),
+        ]);
+    }
+    None
 }
 
 fn mouse_wheel(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
@@ -570,18 +893,17 @@ fn mouse_wheel(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect) {
 fn mouse_release(app: &mut App) {
     if let Some(s) = app.sessions.get_mut(app.focus) {
         s.mouse_down_at = None;
+        // Releasing stops the edge scroll, whatever the pointer does next.
+        s.drag_edge = None;
     }
-    let in_scrollback = matches!(app.mode, Mode::Scrollback(_));
     let Some(s) = app.sessions.get(app.focus) else {
         return;
     };
-    let Some(sel) = s.selection else { return };
-    let text = if in_scrollback && let Some(sb) = &s.scrollback {
-        term_render::extract_selection(&sb.term, sel)
-    } else if let Ok(p) = s.parser.lock() {
-        term_render::extract_selection(&p.term, sel)
-    } else {
-        return;
+    // The buffer is the authority: it holds everything the drag scrolled
+    // through, not just the screen that happens to be up.
+    let text = match (&s.copy, &s.drag) {
+        (Some(buf), Some(drag)) if drag.anchor != drag.tip => buf.text_range(drag.anchor, drag.tip),
+        _ => return,
     };
     if text.trim().is_empty() {
         return;
@@ -638,14 +960,21 @@ fn log_key(key: &KeyEvent, prefix_pending: bool) {
     );
 }
 
-fn resize_all(app: &mut App) {
+/// Rows and columns a focused tile gets at the current terminal size. The
+/// draw pass reports the real inner size back, so this is what a session is
+/// told before its first frame.
+fn tile_size(app: &App) -> (u16, u16) {
     let (term_rows, term_cols) = app.term_size;
-    let sidebar_w: u16 = if app.show_sidebar { 32 } else { 0 };
-    let main_cols = term_cols
+    let sidebar_w: u16 = if app.show_sidebar { ui::SIDEBAR_W } else { 0 };
+    let cols = term_cols
         .saturating_sub(sidebar_w)
         .saturating_sub(2)
         .max(10);
-    let main_rows = term_rows.saturating_sub(3).max(4);
+    (term_rows.saturating_sub(3).max(4), cols)
+}
+
+fn resize_all(app: &mut App) {
+    let (main_rows, main_cols) = tile_size(app);
     if let Some(s) = app.sessions.get_mut(app.focus) {
         let _ = s.resize(main_rows, main_cols);
     }
@@ -788,7 +1117,7 @@ fn handle_prefix_chord(app: &mut App, key: KeyEvent) -> Result<()> {
             });
         }
     } else if keys::PREFIX_PICKER.matches(&key) {
-        app.mode = Mode::Picker(PickerState::new());
+        app.mode = Mode::Picker(Box::new(PickerState::new()));
     } else if keys::PREFIX_SEND_CTRL_A.matches(&key) {
         if let Some(s) = app.sessions.get_mut(app.focus) {
             let _ = s.write(&[0x01]);
@@ -846,7 +1175,7 @@ fn handle_dashboard(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result<()> {
+fn handle_picker(app: &mut App, mut state: Box<PickerState>, key: KeyEvent) -> Result<()> {
     if keys::PICKER_CANCEL.matches(&key) {
         app.mode = Mode::Dashboard;
     } else if keys::PICKER_UP.matches(&key) {
@@ -863,11 +1192,11 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
         app.mode = Mode::Picker(state);
     } else if keys::PICKER_HOME.matches(&key) {
         state.selected = 0;
-        state.ensure_preview();
+        state.request_preview();
         app.mode = Mode::Picker(state);
     } else if keys::PICKER_END.matches(&key) {
         state.selected = state.items.len().saturating_sub(1);
-        state.ensure_preview();
+        state.request_preview();
         app.mode = Mode::Picker(state);
     } else if keys::PICKER_TOGGLE_DANGER.matches(&key) {
         state.dangerous = !state.dangerous;
@@ -894,6 +1223,8 @@ fn handle_picker(app: &mut App, mut state: PickerState, key: KeyEvent) -> Result
                     app.status = format!("resume failed: {e:#}");
                 }
             }
+        } else if state.scanning {
+            app.mode = Mode::Picker(state);
         } else {
             app.mode = Mode::Dashboard;
         }
@@ -1023,391 +1354,9 @@ fn install_panic_hook() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn saved(label: &str, manually_renamed: bool) -> persist::PersistedSession {
-        persist::PersistedSession {
-            cwd: PathBuf::from("/tmp"),
-            label: label.to_string(),
-            dangerous: false,
-            resume_id: None,
-            manually_renamed,
-        }
-    }
-
-    /// Both directions. A name the user typed is pinned, so the probe cannot
-    /// undo it. A label merely carried over from the last run is not, or the
-    /// probe can never rename the session and the TUI ends up showing a
-    /// different name from the browser.
-    #[test]
-    fn only_a_user_chosen_name_is_pinned_on_the_daemon() {
-        assert!(should_pin_label(&saved("mine", true)));
-        assert!(!should_pin_label(&saved("saved-dirname", false)));
-        assert!(!should_pin_label(&saved("", true)));
-        assert!(!should_pin_label(&saved("", false)));
-    }
-}
+#[path = "tests/main.rs"]
+mod tests;
 
 #[cfg(test)]
-mod key_tests {
-    use super::*;
-    use crate::session::Session;
-    use crossterm::event::KeyModifiers;
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-    fn plain(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-    }
-
-    /// Every command goes through the prefix. Ctrl+Q used to quit on its own,
-    /// which meant two bindings for one action and a key taken away from the
-    /// focused session.
-    #[test]
-    fn ctrl_q_is_not_a_quit_binding() {
-        let mut app = App::new(PathBuf::from("/tmp"), (24, 80));
-        handle_key(&mut app, ctrl('q')).expect("handle");
-        assert!(
-            !app.should_quit,
-            "Ctrl+Q quit without the prefix; quitting must go through it"
-        );
-    }
-
-    /// And the prefix reaches quit from a mode, not just the dashboard, so
-    /// dropping Ctrl+Q leaves no state without a way out.
-    #[test]
-    fn the_prefix_quits_from_inside_a_mode() {
-        let mut app = App::new(PathBuf::from("/tmp"), (24, 80));
-        app.mode = Mode::Help;
-
-        handle_key(&mut app, ctrl('a')).expect("handle");
-        assert!(app.prefix_pending, "the prefix is not armed inside a mode");
-
-        handle_key(&mut app, plain('q')).expect("handle");
-        assert!(app.should_quit, "Ctrl+A q did not quit from inside a mode");
-    }
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    /// Drive a chord from the table rather than restating its key here, so a
-    /// rebinding moves the test with it.
-    fn chord(c: &keys::Chord) -> KeyEvent {
-        KeyEvent::new(c.codes[0], c.mods)
-    }
-
-    fn session(id: u64, label: &str) -> Session {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        Session::new_daemon(
-            id,
-            label.into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            id,
-            tx,
-        )
-        .0
-    }
-
-    fn app_with(n: u64) -> App {
-        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
-        for i in 1..=n {
-            app.sessions.push(session(i, &format!("s{i}")));
-        }
-        app
-    }
-
-    fn mode_name(app: &App) -> &'static str {
-        match app.mode {
-            Mode::Dashboard => "Dashboard",
-            Mode::Spawn(_) => "Spawn",
-            Mode::Rename(_) => "Rename",
-            Mode::Picker(_) => "Picker",
-            Mode::ConfirmDetach(_) => "ConfirmDetach",
-            Mode::Scrollback(_) => "Scrollback",
-            Mode::Help => "Help",
-            Mode::Reorder => "Reorder",
-        }
-    }
-
-    /// The prefix arms, then disarms whatever the next key is, so a chord can
-    /// never be left half-entered.
-    #[test]
-    fn the_prefix_is_consumed_by_whatever_key_follows_it() {
-        let mut app = app_with(1);
-        handle_key(&mut app, ctrl('a')).expect("handle");
-        assert!(app.prefix_pending);
-        handle_key(&mut app, plain('z')).expect("handle");
-        assert!(
-            !app.prefix_pending,
-            "an unrecognised chord key left the prefix armed"
-        );
-    }
-
-    #[test]
-    fn the_prefix_opens_each_mode_it_is_meant_to() {
-        for (c, want) in [
-            (&keys::PREFIX_HELP, "Help"),
-            (&keys::PREFIX_SPAWN, "Spawn"),
-            (&keys::PREFIX_DETACH, "ConfirmDetach"),
-            (&keys::PREFIX_REORDER, "Reorder"),
-            (&keys::PREFIX_SCROLLBACK, "Scrollback"),
-        ] {
-            let mut app = app_with(1);
-            handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-            handle_key(&mut app, chord(c)).expect("handle");
-            assert_eq!(
-                mode_name(&app),
-                want,
-                "Ctrl+A {} should open {want}, got {}",
-                c.label,
-                mode_name(&app)
-            );
-        }
-    }
-
-    /// Detach and rename act on the focused session, so with none focused they
-    /// must do nothing rather than open a modal pointing at no session.
-    #[test]
-    fn prefix_chords_that_need_a_session_do_nothing_without_one() {
-        for c in [
-            &keys::PREFIX_DETACH,
-            &keys::PREFIX_RENAME,
-            &keys::PREFIX_REORDER,
-            &keys::PREFIX_SCROLLBACK,
-        ] {
-            let mut app = app_with(0);
-            handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-            handle_key(&mut app, chord(c)).expect("handle");
-            assert_eq!(
-                mode_name(&app),
-                "Dashboard",
-                "Ctrl+A {} opened a modal with no session to act on",
-                c.label
-            );
-        }
-    }
-
-    #[test]
-    fn the_prefix_cycles_focus_both_ways() {
-        let mut app = app_with(3);
-        app.focus = 0;
-        handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-        handle_key(&mut app, chord(&keys::PREFIX_FOCUS_PREV)).expect("handle");
-        assert_eq!(app.focus, 2, "previous from the first should wrap to last");
-        handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-        handle_key(&mut app, chord(&keys::PREFIX_FOCUS_NEXT)).expect("handle");
-        assert_eq!(app.focus, 0, "next from the last should wrap to first");
-    }
-
-    #[test]
-    fn a_prefix_digit_jumps_to_that_session() {
-        let mut app = app_with(3);
-        handle_key(&mut app, ctrl('a')).expect("handle");
-        handle_key(&mut app, plain('3')).expect("handle");
-        assert_eq!(app.focus, 2, "Ctrl+A 3 should focus the third session");
-
-        handle_key(&mut app, ctrl('a')).expect("handle");
-        handle_key(&mut app, plain('9')).expect("handle");
-        assert_eq!(app.focus, 2, "a digit past the end should not move focus");
-    }
-
-    #[test]
-    fn the_prefix_toggles_the_sidebar_back_and_forth() {
-        let mut app = app_with(1);
-        let before = app.show_sidebar;
-        handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-        handle_key(&mut app, chord(&keys::PREFIX_TOGGLE_SIDEBAR)).expect("handle");
-        assert_ne!(app.show_sidebar, before, "the sidebar did not toggle");
-        handle_key(&mut app, chord(&keys::PREFIX)).expect("handle");
-        handle_key(&mut app, chord(&keys::PREFIX_TOGGLE_SIDEBAR)).expect("handle");
-        assert_eq!(app.show_sidebar, before, "it did not toggle back");
-    }
-
-    /// Ctrl+A a sends a literal Ctrl+A to the session, which is how a nested
-    /// program that uses the same prefix stays reachable.
-    #[test]
-    fn the_prefix_can_send_a_literal_prefix_to_the_session() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (sess, _slot) = Session::new_daemon(
-            1,
-            "s".into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            1,
-            tx,
-        );
-        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
-        app.sessions.push(sess);
-
-        handle_key(&mut app, ctrl('a')).expect("handle");
-        handle_key(&mut app, plain('a')).expect("handle");
-
-        match rx.try_recv().expect("nothing was sent to the session") {
-            cmux_proto::Request::Input { bytes, .. } => assert_eq!(bytes, vec![0x01]),
-            other => panic!("expected Input, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn confirming_a_detach_ends_the_session_and_declining_keeps_it() {
-        let mut app = app_with(2);
-        app.mode = Mode::ConfirmDetach(1);
-        handle_key(&mut app, plain('n')).expect("handle");
-        assert_eq!(app.sessions.len(), 2, "declining should keep it");
-        assert_eq!(mode_name(&app), "Dashboard");
-
-        app.mode = Mode::ConfirmDetach(1);
-        handle_key(&mut app, plain('y')).expect("handle");
-        assert_eq!(app.sessions.len(), 1, "confirming should end it");
-        assert_eq!(app.sessions[0].id, 2, "it removed the wrong session");
-    }
-
-    #[test]
-    fn a_detach_confirmed_for_a_session_that_is_gone_does_nothing() {
-        let mut app = app_with(1);
-        app.mode = Mode::ConfirmDetach(99);
-        handle_key(&mut app, plain('y')).expect("handle");
-        assert_eq!(app.sessions.len(), 1, "it removed an unrelated session");
-        assert_eq!(mode_name(&app), "Dashboard");
-    }
-
-    #[test]
-    fn reorder_moves_the_focused_session_and_esc_leaves_the_mode() {
-        let mut app = app_with(3);
-        app.focus = 0;
-        app.mode = Mode::Reorder;
-        handle_key(&mut app, key(KeyCode::Down)).expect("handle");
-        let order: Vec<u64> = app.sessions.iter().map(|s| s.id).collect();
-        assert_eq!(order, vec![2, 1, 3], "the session did not move down");
-        assert_eq!(app.focus, 1, "focus should follow the session it moved");
-        assert_eq!(mode_name(&app), "Reorder", "it should stay in reorder");
-
-        handle_key(&mut app, key(KeyCode::Esc)).expect("handle");
-        assert_eq!(mode_name(&app), "Dashboard");
-    }
-
-    #[test]
-    fn reorder_at_the_end_of_the_list_does_not_wrap_out_of_range() {
-        let mut app = app_with(2);
-        app.focus = 0;
-        app.mode = Mode::Reorder;
-        handle_key(&mut app, key(KeyCode::Up)).expect("handle");
-        let order: Vec<u64> = app.sessions.iter().map(|s| s.id).collect();
-        assert_eq!(order.len(), 2, "a session was lost");
-        assert!(app.focus < app.sessions.len(), "focus went out of range");
-    }
-
-    #[test]
-    fn renaming_commits_on_enter_and_discards_on_escape() {
-        let mut app = app_with(1);
-        app.mode = Mode::Rename(RenameState {
-            session_id: 1,
-            buf: String::new(),
-        });
-        for c in "newname".chars() {
-            handle_key(&mut app, plain(c)).expect("handle");
-        }
-        handle_key(&mut app, key(KeyCode::Enter)).expect("handle");
-        assert_eq!(app.sessions[0].label, "newname");
-        assert_eq!(mode_name(&app), "Dashboard");
-
-        app.mode = Mode::Rename(RenameState {
-            session_id: 1,
-            buf: "discarded".into(),
-        });
-        handle_key(&mut app, key(KeyCode::Esc)).expect("handle");
-        assert_eq!(
-            app.sessions[0].label, "newname",
-            "escape should discard the edit"
-        );
-    }
-
-    #[test]
-    fn backspace_edits_the_rename_buffer() {
-        let mut app = app_with(1);
-        app.mode = Mode::Rename(RenameState {
-            session_id: 1,
-            buf: "abc".into(),
-        });
-        handle_key(&mut app, key(KeyCode::Backspace)).expect("handle");
-        handle_key(&mut app, key(KeyCode::Enter)).expect("handle");
-        assert_eq!(app.sessions[0].label, "ab");
-    }
-
-    #[test]
-    fn help_closes_on_any_key() {
-        let mut app = app_with(1);
-        app.mode = Mode::Help;
-        handle_key(&mut app, plain('x')).expect("handle");
-        assert_eq!(mode_name(&app), "Dashboard", "help should close");
-    }
-
-    /// With the daemon gone there is nothing left to drive, so every key ends
-    /// the session rather than being sent into a dead socket.
-    #[test]
-    fn any_key_quits_once_the_daemon_is_lost() {
-        let mut app = app_with(1);
-        app.daemon_lost = true;
-        handle_key(&mut app, plain('x')).expect("handle");
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn an_ordinary_key_reaches_the_focused_session() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (sess, _slot) = Session::new_daemon(
-            1,
-            "s".into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            1,
-            tx,
-        );
-        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
-        app.sessions.push(sess);
-
-        handle_key(&mut app, plain('x')).expect("handle");
-        match rx.try_recv().expect("the keystroke never reached the pty") {
-            cmux_proto::Request::Input { bytes, .. } => assert_eq!(bytes, b"x".to_vec()),
-            other => panic!("expected Input, got {other:?}"),
-        }
-    }
-
-    fn saved(label: &str, manually_renamed: bool) -> persist::PersistedSession {
-        persist::PersistedSession {
-            cwd: PathBuf::from("/tmp"),
-            label: label.to_string(),
-            dangerous: false,
-            resume_id: None,
-            manually_renamed,
-        }
-    }
-
-    /// Pinning a label the user never chose stops the status probe renaming the
-    /// session ever again, which is how the TUI and the browser drifted apart.
-    #[test]
-    fn only_a_name_the_user_chose_is_pinned() {
-        assert!(should_pin_label(&saved("mine", true)));
-        assert!(!should_pin_label(&saved("carried-over", false)));
-        assert!(
-            !should_pin_label(&saved("", true)),
-            "an empty label is nothing to pin"
-        );
-    }
-}
+#[path = "tests/main_keys.rs"]
+mod key_tests;

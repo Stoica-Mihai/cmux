@@ -1,30 +1,14 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as AlaColor, NamedColor, Rgb};
+pub use cmux_term::TermSize;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+
+use cmux_term::{CellColor, is_continuation};
 use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::widgets::Widget;
-
-#[derive(Clone, Copy, Debug)]
-pub struct TermSize {
-    pub lines: usize,
-    pub cols: usize,
-}
-
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.lines
-    }
-    fn screen_lines(&self) -> usize {
-        self.lines
-    }
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
 
 pub struct TermWidget<'a> {
     term: &'a Term<VoidListener>,
@@ -52,11 +36,6 @@ impl<'a> TermWidget<'a> {
     }
 }
 
-fn is_continuation(cell: &Cell) -> bool {
-    cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-        || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-}
-
 /// Viewport-relative selection between two cells. Coordinates are 0-indexed
 /// row, col within the focused tile's inner area. The two endpoints may be in
 /// any order; `normalized()` produces (top-left, bottom-right) in linear text
@@ -68,13 +47,6 @@ pub struct TileSelection {
 }
 
 impl TileSelection {
-    pub fn new(row: u16, col: u16) -> Self {
-        Self {
-            anchor: (row, col),
-            tip: (row, col),
-        }
-    }
-
     /// Returns (start_row, start_col, end_row, end_col) ordered for a linear
     /// row-major sweep.
     pub fn normalized(&self) -> (u16, u16, u16, u16) {
@@ -102,53 +74,6 @@ impl TileSelection {
             true
         }
     }
-}
-
-/// Extract text from the focused tile within the selection range.
-/// Walks `display_iter` and emits characters in row-major order, inserting
-/// '\n' at row breaks.
-pub fn extract_selection(term: &Term<VoidListener>, sel: TileSelection) -> String {
-    let (sr, sc, er, ec) = sel.normalized();
-    let display_offset = term.grid().display_offset() as i32;
-    let viewport_top = -display_offset;
-    let mut out = String::new();
-    let mut current_row: Option<u16> = None;
-    for indexed in term.grid().display_iter() {
-        let row_i = indexed.point.line.0 - viewport_top;
-        if row_i < 0 {
-            continue;
-        }
-        let row = row_i as u16;
-        let col = indexed.point.column.0 as u16;
-        if !sel.contains(row, col) {
-            continue;
-        }
-        if let Some(prev) = current_row
-            && prev != row
-        {
-            for _ in prev..row {
-                out.push('\n');
-            }
-        }
-        current_row = Some(row);
-        if is_continuation(indexed.cell) {
-            continue;
-        }
-        let c = indexed.cell.c;
-        out.push(if c == '\0' { ' ' } else { c });
-        // also flush any zerowidth combiners attached to this cell
-        if let Some(extras) = indexed.cell.zerowidth() {
-            for &zc in extras {
-                out.push(zc);
-            }
-        }
-        let _ = (sr, sc, er, ec);
-    }
-    // trim trailing whitespace from each line for cleanliness
-    out.lines()
-        .map(|l| l.trim_end_matches(' '))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 const PALETTE_LEN: usize = 269;
@@ -384,215 +309,133 @@ pub fn visible_text(term: &Term<VoidListener>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alacritty_terminal::term::Config as TermConfig;
-    use alacritty_terminal::vte::ansi::Processor;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use ratatui::widgets::Widget;
+#[path = "tests/term_render.rs"]
+mod tests;
 
-    fn build(rows: usize, cols: usize, bytes: &[u8]) -> Term<VoidListener> {
-        let config = TermConfig {
-            scrolling_history: 1000,
-            ..Default::default()
+// ---------------------------------------------------------------------------
+// OSC 8 hyperlink passthrough
+// ---------------------------------------------------------------------------
+
+/// Re-print the hyperlinked cells of a rendered tile, wrapped in OSC 8, so the
+/// outer terminal carries the link target and not just the visible text.
+///
+/// ratatui's `Cell` has no hyperlink attribute, and an escape inside a cell
+/// symbol corrupts `Buffer::diff`, which derives how many following cells to
+/// skip from `symbol().width()`. So this runs after the frame is drawn, over
+/// the cells the frame just painted.
+///
+/// Cells sharing a hyperlink id and sitting next to each other are emitted as
+/// one run, opened and closed within a single write.
+pub fn emit_hyperlinks<W: std::io::Write>(
+    term: &Term<VoidListener>,
+    area: Rect,
+    out: &mut W,
+) -> std::io::Result<()> {
+    let content = term.renderable_content();
+    let viewport_top = -(content.display_offset as i32);
+    let palette = content.colors;
+    let mut palette_table: [Option<RColor>; PALETTE_LEN] = [None; PALETTE_LEN];
+    for i in 0..PALETTE_LEN {
+        palette_table[i] = palette[i].map(rgb_to_ratatui);
+    }
+
+    let mut run: Option<Run> = None;
+    for indexed in content.display_iter {
+        let cell = indexed.cell;
+        let row = indexed.point.line.0 - viewport_top;
+        let col = indexed.point.column.0 as i32;
+        let inside = row >= 0
+            && col >= 0
+            && (row as usize) < area.height as usize
+            && (col as usize) < area.width as usize;
+
+        let link = if inside && !is_continuation(cell) {
+            cell.hyperlink()
+        } else {
+            None
         };
-        let size = TermSize { lines: rows, cols };
-        let mut term = Term::new(config, &size, VoidListener);
-        let mut proc: Processor = Processor::new();
-        proc.advance(&mut term, bytes);
-        term
-    }
-
-    #[test]
-    fn renders_plain_text() {
-        let term = build(3, 10, b"hello\r\nworld");
-        let area = Rect::new(0, 0, 10, 3);
-        let mut buf = Buffer::empty(area);
-        TermWidget::new(&term).render(area, &mut buf);
-        let row0: String = (0..5)
-            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap())
-            .collect();
-        let row1: String = (0..5)
-            .map(|x| buf[(x, 1)].symbol().chars().next().unwrap())
-            .collect();
-        assert_eq!(row0, "hello");
-        assert_eq!(row1, "world");
-    }
-
-    #[test]
-    fn visible_text_round_trip() {
-        let term = build(3, 10, b"line1\r\nline2\r\nline3");
-        let text = visible_text(&term);
-        let joined: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
-        assert_eq!(joined, vec!["line1", "line2", "line3"]);
-    }
-
-    #[test]
-    fn red_sgr_maps_to_red_fg() {
-        let term = build(1, 5, b"\x1b[31mX\x1b[0m");
-        let area = Rect::new(0, 0, 5, 1);
-        let mut buf = Buffer::empty(area);
-        TermWidget::new(&term).render(area, &mut buf);
-        assert_eq!(buf[(0, 0)].symbol(), "X");
-        assert_eq!(buf[(0, 0)].fg, RColor::Red);
-    }
-
-    fn sel(anchor: (u16, u16), tip: (u16, u16)) -> TileSelection {
-        TileSelection { anchor, tip }
-    }
-
-    /// A drag has two directions and one of them is the mirror of the other,
-    /// so both have to agree on the same ordered range.
-    #[test]
-    fn a_selection_normalizes_the_same_dragged_either_way() {
-        let forward = sel((0, 2), (3, 5)).normalized();
-        let backward = sel((3, 5), (0, 2)).normalized();
-        assert_eq!(forward, (0, 2, 3, 5));
-        assert_eq!(backward, forward, "dragging back should give the same range");
-    }
-
-    #[test]
-    fn a_selection_within_one_row_covers_only_that_span() {
-        let s = sel((1, 2), (1, 4));
-        assert!(!s.contains(1, 1), "col 1 is before the start");
-        assert!(s.contains(1, 2), "the start col is included");
-        assert!(s.contains(1, 4), "the end col is included");
-        assert!(!s.contains(1, 5), "col 5 is past the end");
-        assert!(!s.contains(0, 3), "a different row is not covered");
-        assert!(!s.contains(2, 3));
-    }
-
-    #[test]
-    fn a_multi_row_selection_covers_the_ends_partially_and_the_middle_whole() {
-        let s = sel((1, 3), (3, 2));
-        assert!(!s.contains(1, 2), "before the anchor on the first row");
-        assert!(s.contains(1, 3));
-        assert!(s.contains(1, 99), "the first row runs to its end");
-        assert!(s.contains(2, 0) && s.contains(2, 99), "middle rows are whole");
-        assert!(s.contains(3, 2));
-        assert!(!s.contains(3, 3), "past the tip on the last row");
-        assert!(!s.contains(0, 5) && !s.contains(4, 0));
-    }
-
-    #[test]
-    fn extracting_one_row_gives_just_that_span() {
-        let term = build(3, 12, b"hello world\r\nsecond line");
-        assert_eq!(extract_selection(&term, sel((0, 0), (0, 4))), "hello");
-        assert_eq!(extract_selection(&term, sel((0, 6), (0, 10))), "world");
-    }
-
-    #[test]
-    fn extracting_across_rows_joins_them_with_a_newline() {
-        let term = build(3, 12, b"hello world\r\nsecond line");
-        assert_eq!(
-            extract_selection(&term, sel((0, 6), (1, 5))),
-            "world\nsecond"
-        );
-    }
-
-    #[test]
-    fn extracting_a_backwards_drag_gives_the_same_text() {
-        let term = build(3, 12, b"hello world\r\nsecond line");
-        assert_eq!(
-            extract_selection(&term, sel((1, 5), (0, 6))),
-            extract_selection(&term, sel((0, 6), (1, 5))),
-            "the text should not depend on which way it was dragged"
-        );
-    }
-
-    /// A wide glyph occupies two cells; the second holds no character of its
-    /// own, so emitting it would double the glyph.
-    #[test]
-    fn a_wide_glyph_is_emitted_once() {
-        let term = build(1, 10, "日本".as_bytes());
-        assert_eq!(extract_selection(&term, sel((0, 0), (0, 9))), "日本");
-    }
-
-    #[test]
-    fn trailing_blanks_are_trimmed_off_each_line() {
-        let term = build(2, 20, b"ab\r\ncd");
-        assert_eq!(extract_selection(&term, sel((0, 0), (1, 19))), "ab\ncd");
-    }
-
-    #[test]
-    fn an_empty_region_extracts_to_nothing() {
-        let term = build(3, 10, b"");
-        assert_eq!(extract_selection(&term, sel((0, 0), (2, 9))).trim(), "");
-    }
-
-    /// Indices 0-7 are the normal colours and 8-15 their bright counterparts,
-    /// so a table off by eight silently swaps every colour in the UI.
-    #[test]
-    fn the_low_palette_indices_map_to_their_named_colours() {
-        assert_eq!(named_to_ratatui(indexed_low_to_named(0)), RColor::Black);
-        assert_eq!(named_to_ratatui(indexed_low_to_named(1)), RColor::Red);
-        assert_eq!(named_to_ratatui(indexed_low_to_named(7)), RColor::Gray);
-        assert_eq!(named_to_ratatui(indexed_low_to_named(8)), RColor::DarkGray);
-        assert_eq!(named_to_ratatui(indexed_low_to_named(9)), RColor::LightRed);
-        assert_eq!(named_to_ratatui(indexed_low_to_named(15)), RColor::White);
-    }
-
-    #[test]
-    fn a_bright_sgr_renders_brighter_than_its_normal_pair() {
-        let normal = build(1, 3, b"\x1b[31mX");
-        let bright = build(1, 3, b"\x1b[91mX");
-        let render = |t: &Term<VoidListener>| {
-            let area = Rect::new(0, 0, 3, 1);
-            let mut buf = Buffer::empty(area);
-            TermWidget::new(t).render(area, &mut buf);
-            buf[(0, 0)].fg
+        let Some(link) = link else {
+            if let Some(r) = run.take() {
+                r.write(out)?;
+            }
+            continue;
         };
-        assert_eq!(render(&normal), RColor::Red);
-        assert_eq!(render(&bright), RColor::LightRed);
+
+        let x = area.x + col as u16;
+        let y = area.y + row as u16;
+        let ch = if cell.c == '\0' { ' ' } else { cell.c };
+        let fg = to_cell_color(convert_color(cell.fg, &palette_table));
+        let bg = to_cell_color(convert_color(cell.bg, &palette_table));
+
+        match run.as_mut() {
+            Some(r) if r.extends(&link, x, y) => r.push(ch, fg, bg, cell.flags),
+            _ => {
+                if let Some(r) = run.take() {
+                    r.write(out)?;
+                }
+                let mut r = Run::new(&link, x, y);
+                r.push(ch, fg, bg, cell.flags);
+                run = Some(r);
+            }
+        }
+    }
+    if let Some(r) = run.take() {
+        r.write(out)?;
+    }
+    Ok(())
+}
+
+/// One horizontal stretch of cells sharing a hyperlink.
+struct Run {
+    id: String,
+    uri: String,
+    x: u16,
+    y: u16,
+    /// Each cell's glyph with the colours and attributes to print it under.
+    cells: Vec<(char, CellColor, CellColor, Flags)>,
+}
+
+impl Run {
+    fn new(link: &alacritty_terminal::term::cell::Hyperlink, x: u16, y: u16) -> Self {
+        Self {
+            id: link.id().to_string(),
+            uri: link.uri().to_string(),
+            x,
+            y,
+            cells: Vec::new(),
+        }
     }
 
-    #[test]
-    fn a_true_colour_sgr_survives_as_rgb() {
-        let term = build(1, 3, b"\x1b[38;2;18;52;86mX");
-        let area = Rect::new(0, 0, 3, 1);
-        let mut buf = Buffer::empty(area);
-        TermWidget::new(&term).render(area, &mut buf);
-        assert_eq!(buf[(0, 0)].fg, RColor::Rgb(0x12, 0x34, 0x56));
+    /// The next cell continues this run when it carries the same link and sits
+    /// immediately to the right.
+    fn extends(&self, link: &alacritty_terminal::term::cell::Hyperlink, x: u16, y: u16) -> bool {
+        self.id == link.id()
+            && self.uri == link.uri()
+            && y == self.y
+            && x as usize == self.x as usize + self.cells.len()
     }
 
-    #[test]
-    fn rendering_into_a_zero_sized_area_draws_nothing() {
-        let term = build(3, 10, b"hello");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
-        TermWidget::new(&term).render(Rect::new(0, 0, 0, 0), &mut buf);
-        TermWidget::new(&term).render(Rect::new(0, 0, 10, 0), &mut buf);
-        TermWidget::new(&term).render(Rect::new(0, 0, 0, 3), &mut buf);
-        assert_eq!(buf[(0, 0)].symbol(), " ", "nothing should have been drawn");
+    fn push(&mut self, ch: char, fg: CellColor, bg: CellColor, flags: Flags) {
+        self.cells.push((ch, fg, bg, flags));
     }
 
-    #[test]
-    fn rendering_into_an_area_smaller_than_the_grid_clips() {
-        let term = build(5, 20, b"aaaaaaaaaa\r\nbbbbbbbbbb\r\ncccccccccc");
-        let area = Rect::new(0, 0, 4, 2);
-        let mut buf = Buffer::empty(area);
-        TermWidget::new(&term).render(area, &mut buf);
-        assert_eq!(buf[(0, 0)].symbol(), "a");
-        assert_eq!(buf[(0, 1)].symbol(), "b");
+    fn write<W: std::io::Write>(self, out: &mut W) -> std::io::Result<()> {
+        write!(out, "\x1b[{};{}H", self.y + 1, self.x + 1)?;
+        write!(out, "\x1b]8;id={};{}\x1b\\", self.id, self.uri)?;
+        for (ch, fg, bg, flags) in &self.cells {
+            out.write_all(cmux_term::sgr(*fg, *bg, *flags).as_bytes())?;
+            write!(out, "{}", ch)?;
+        }
+        out.write_all(b"\x1b]8;;\x1b\\\x1b[0m")?;
+        Ok(())
     }
+}
 
-    #[test]
-    fn a_selection_highlight_only_covers_the_selected_cells() {
-        let term = build(1, 6, b"abcdef");
-        let area = Rect::new(0, 0, 6, 1);
-        let mut plain = Buffer::empty(area);
-        TermWidget::new(&term).render(area, &mut plain);
-        let mut marked = Buffer::empty(area);
-        TermWidget::new(&term)
-            .with_selection(Some(sel((0, 1), (0, 3))))
-            .render(area, &mut marked);
-
-        assert_eq!(plain[(0, 0)].bg, marked[(0, 0)].bg, "col 0 is not selected");
-        assert_ne!(
-            plain[(2, 0)].bg,
-            marked[(2, 0)].bg,
-            "col 2 is selected and should look different"
-        );
-        assert_eq!(plain[(5, 0)].bg, marked[(5, 0)].bg, "col 5 is not selected");
+/// A palette-resolved ratatui colour, as the shared SGR encoder takes it.
+fn to_cell_color(c: RColor) -> CellColor {
+    match c {
+        RColor::Rgb(r, g, b) => CellColor::Rgb(r, g, b),
+        RColor::Indexed(i) => CellColor::Indexed(i),
+        _ => CellColor::Default,
     }
 }

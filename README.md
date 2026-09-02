@@ -21,9 +21,27 @@ Either way the session list (cwd, label, dangerous flag, resume id, sidebar stat
 ```
 crates/
 ├── cmux/         # TUI binary
-├── cmux-proto/   # wire types + framed JSON codec
+├── cmux-proto/   # wire types, framed JSON codec, and what both binaries
+│                 #   know about claude itself (argv, its session records,
+│                 #   the permission-prompt phrasings)
+├── cmux-term/    # what both binaries know about a terminal grid (size,
+│                 #   double-width spacers, grid-to-text, SGR encoding)
 └── cmuxd/        # daemon binary
 ```
+
+Unit tests live in `<crate>/src/tests/<module>.rs`, one file per module under
+test, and each module declares its own:
+
+```rust
+#[cfg(test)]
+#[path = "tests/transcripts.rs"]
+mod tests;
+```
+
+The test file stays a child module of the code it tests, so it reaches private
+items the way an in-file `mod tests` did. A `tests/` directory at the crate root
+would not: `cmux` and `cmuxd` are binary crates with no library target, so an
+integration test cannot import them at all.
 
 ## Requirements
 
@@ -278,7 +296,7 @@ that even though the fonts and the daemon do not.
 
 ## Selecting text
 
-Click and drag inside the focused tile to select claude's output. On release, the selection is copied to your system clipboard via OSC 52. Most modern terminals (kitty, ghostty, wezterm, foot, alacritty, recent gnome-terminal, iTerm2) respect OSC 52 by default.
+Click and drag inside the focused tile to select claude's output. Drag past the top or bottom edge and hold: cmux scrolls the session and the selection keeps extending, so a copy is not limited to what one screen shows. On release, the whole range is copied to your system clipboard via OSC 52. Most modern terminals (kitty, ghostty, wezterm, foot, alacritty, recent gnome-terminal, iTerm2) respect OSC 52 by default.
 
 cmux captures the mouse, so the outer terminal's native drag-select is disabled while cmux is running. Hold **Shift** while dragging to bypass cmux and fall back to the outer terminal's selection (useful when OSC 52 isn't honored).
 
@@ -332,10 +350,21 @@ Hidden directories (names starting with `.`) are filtered from the listing.
 | `PageUp` / `PageDown` | Move by 10 |
 | `Home` / `End` | Jump to first / last |
 | `Tab` | Toggle `--dangerously-skip-permissions` |
-| `Enter` | Resume selected transcript via `claude --resume <id>` |
+| `Enter` | Open selected transcript: `claude attach <short id>` when it is marked `running`, otherwise `claude --resume <id>` |
 | `Esc` | Cancel |
 
-Selected transcript shows a preview pane (first ~40 lines).
+Selected transcript shows a preview pane (first ~40 lines). Each row opens with
+a dot: green for a conversation claude currently holds as a background session,
+dimmed for one that is not running. A `fork` mark follows the name for a forked
+conversation: a transcript records its own origin as `forkedFrom`, while a
+background session's sits in `~/.claude/jobs/<short id>/state.json` as
+`forkParentSessionId`. A green-dot session keeps running after its tile is
+closed. The name column shows
+claude's own name for a running session and the transcript's `--name` title
+otherwise, and the filter matches whichever is shown. For a name claude composed
+itself (`<parent> <fork glyph> <purpose>`, marked `nameSource: "auto"`), the
+column shows the purpose alone and the `fork` mark carries the rest. The preview pane names a
+fork's origin above the transcript text.
 
 ### Scrollback mode (`Ctrl+A` `[`)
 | Key | Action |
@@ -406,15 +435,19 @@ Delete the file to start clean.
 - A custom `TermWidget` (`crates/cmux/src/term_render.rs`) walks the term's `display_iter` and writes each `Cell` into ratatui's `Buffer`, mapping alacritty SGR flags (bold/dim/italic/underline/strikeout/inverse) and color (`Named` / `Spec(Rgb)` / `Indexed`) onto ratatui styles.
 - After every draw, actual rendered tile sizes are pushed back to each PTY via `MasterPty::resize` and `Term::resize` so claude sees correct dimensions even as the grid reshapes.
 - Scrollback is driven through `Term::scroll_display(Scroll::Delta | PageUp | PageDown | Top | Bottom)`.
+- The sidebar is one row per session: running dot, session number, name, and how long since it last moved, with the age right-aligned. The number column widens with the list and the danger marker takes a column only when a session carries the flag, so no row spends cells on a marker none of them show. A cwd is what the resume picker is for, and an auto-derived name is the folder's name anyway; how a dead session ended is on its tile's title.
+- Dragging a selection past the tile's edge scrolls the session and keeps going: cmux sends the child a wheel event, and the rows it reveals are stitched into a buffer the selection addresses instead of viewport rows (`crates/cmux/src/copy_buffer.rs`). How far the view moved is derived from the overlap between consecutive screens rather than assumed, so a child free to scroll 2 rows one time and 3 the next stays handled; rows that stay at a fixed screen position while the content moves past them are the child's chrome and are kept out of the copy. A screen that cannot be matched is refused rather than guessed at.
+- OSC 8 hyperlinks reach the outer terminal, so a link in a session stays clickable. ratatui's `Cell` carries no hyperlink attribute, and an escape placed inside a cell symbol corrupts `Buffer::diff`, which derives how many following cells to skip from `symbol().width()`. So `term_render::emit_hyperlinks` runs after each frame is drawn and re-prints just the linked cells wrapped in OSC 8, one write per run, skipped while a popup covers the tile.
 - Sessions whose child exits are reaped on the next event-loop tick.
-- Resume uses `claude --resume <session_id>`; the id is extracted from the transcript path under `~/.claude/projects/<slugified-cwd>/<id>.jsonl`.
+- Resume uses `claude --resume <session_id>`; the id is extracted from the transcript path under `~/.claude/projects/<slugified-cwd>/<id>.jsonl`. `claude --resume` exits with an error on a session claude is already running in the background, so `crates/cmux/src/claude_sessions.rs` reads the live `kind: "bg"` records under `~/.claude/sessions/` and those sessions open with `claude attach <short id>` instead.
+- The picker's directory scan and its transcript previews each run on their own thread; the popup opens on the next frame and fills in as they land.
 
 ### Daemon mode (the default)
 - `cmuxd` owns every PTY, parser, and alacritty `Term` instance. Runs on a `tokio` multi-thread runtime.
 - The daemon knows nothing about `claude`. `Request::SpawnSession` carries the argv to exec plus the client's grid size, and a `ProbeKind` selecting how status is derived. `ProbeKind::Claude` installs the probe in `crates/cmuxd/src/probe.rs`; `ProbeKind::None` runs no probe and starts no polling task. Adding support for another program means adding a `StatusProbe` impl, not touching the session plumbing.
 - Communication over a UNIX socket at `$XDG_RUNTIME_DIR/cmux/cmuxd.sock` with file mode `0o600`. Per-message framing is `u32_le length || serde_json payload`.
 - Per session inside the daemon: blocking PTY reader → fans bytes into `tokio::sync::broadcast::Sender<Vec<u8>>` so every attached client gets the same byte stream as a `FrameDelta` event.
-- Attaching does not replay the raw ring for a full-screen program. `cmuxd` keeps a parsed `alacritty_terminal::Term` per session and re-renders it as escape sequences (`crates/cmuxd/src/snapshot.rs`), so a client is handed the picture rather than the film of how it was painted. A shell still gets its ring first, for scrollback, followed by that repaint. The same payload feeds the TUI and the browser, and is also what a lagging client is resynced with.
+- Attaching does not replay the raw ring for a full-screen program. `cmuxd` keeps a parsed `alacritty_terminal::Term` per session and re-renders it as escape sequences (`crates/cmuxd/src/snapshot.rs`), so a client is handed the picture rather than the film of how it was painted. That re-render carries each cell's OSC 8 hyperlink, without which the repaint would strip a link the raw bytes had. A shell still gets its ring first, for scrollback, followed by that repaint. The same payload feeds the TUI and the browser, and is also what a lagging client is resynced with.
 - `cmux` runs the same TUI / renderer / mouse selection / OSC 52 path as local mode. The only difference is per-Session backend: `Session::Backend::Daemon` routes `write()` / `resize()` / `kill()` / `detach_keep()` to `Request::Input` / `Request::Resize` / `Request::Detach`.
 - A connection-side reader thread distributes `FrameDelta` events into per-session `DaemonSlot` Arcs (parser + ring + dirty + alive). UI code reads these unchanged from local mode.
 
@@ -425,5 +458,4 @@ Workspace: `alacritty_terminal` (via re-exported `vte` 0.15), `portable-pty`, `r
 ## Known limitations
 
 - Image-class terminal protocols are out of scope: sixel, kitty graphics, iTerm2 inline images are silently dropped. Adding any of those requires a passthrough render path that bypasses the cell grid for the focused tile. Text-class sequences (xterm SGR, OSC 8 hyperlinks, OSC 52 clipboard, synchronized output, bracketed paste, mouse SGR) are parsed faithfully.
-- OSC 8 hyperlink cells render their visible text but the link itself is not re-emitted to the outer terminal — clicking won't open it.
 - Daemon mode survives `cmux` exit but does **not** survive `cmuxd` exit. Snapshot-based restore across daemon restarts is not yet shipped.

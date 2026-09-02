@@ -1,18 +1,29 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Format an elapsed-seconds count as a compact `s/m/h/d` cell. Caller picks
-/// the suffix — `" ago"` reads naturally on a timestamp column, `""` on a
-/// sidebar status line.
-pub fn format_duration_secs(secs: u64, suffix: &str) -> String {
+/// Format an elapsed-seconds count as a compact `s`/`m`/`h`/`d` cell, at most
+/// four characters wide.
+pub fn format_duration_secs(secs: u64) -> String {
     if secs < 60 {
-        format!("{}s{}", secs, suffix)
+        format!("{}s", secs)
     } else if secs < 3600 {
-        format!("{}m{}", secs / 60, suffix)
+        format!("{}m", secs / 60)
     } else if secs < 86_400 {
-        format!("{}h{}", secs / 3600, suffix)
+        format!("{}h", secs / 3600)
     } else {
-        format!("{}d{}", secs / 86_400, suffix)
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// Format a byte count for a fixed-width column: whole kibibytes below one
+/// mebibyte, one decimal of mebibytes at or above it.
+pub fn format_size_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{}KB", bytes / KB)
     }
 }
 
@@ -49,8 +60,8 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
     home().map(|h| h.join(".claude").join("projects"))
 }
 
-pub fn claude_sessions_dir() -> Option<PathBuf> {
-    home().map(|h| h.join(".claude").join("sessions"))
+pub fn claude_jobs_dir() -> Option<PathBuf> {
+    home().map(|h| h.join(".claude").join("jobs"))
 }
 
 #[macro_export]
@@ -70,33 +81,5 @@ macro_rules! debug_log {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_duration_secs_buckets() {
-        assert_eq!(format_duration_secs(0, ""), "0s");
-        assert_eq!(format_duration_secs(59, " ago"), "59s ago");
-        assert_eq!(format_duration_secs(60, ""), "1m");
-        assert_eq!(format_duration_secs(3599, " ago"), "59m ago");
-        assert_eq!(format_duration_secs(3600, ""), "1h");
-        assert_eq!(format_duration_secs(86_399, " ago"), "23h ago");
-        assert_eq!(format_duration_secs(86_400, ""), "1d");
-        assert_eq!(format_duration_secs(10 * 86_400, " ago"), "10d ago");
-    }
-
-    #[test]
-    fn wrap_index_handles_empty() {
-        assert_eq!(wrap_index(0, 0, 1), 0);
-        assert_eq!(wrap_index(5, 0, -3), 0);
-    }
-
-    #[test]
-    fn wrap_index_wraps_both_directions() {
-        assert_eq!(wrap_index(0, 4, 1), 1);
-        assert_eq!(wrap_index(3, 4, 1), 0); // forward wrap
-        assert_eq!(wrap_index(0, 4, -1), 3); // backward wrap
-        assert_eq!(wrap_index(2, 4, 5), 3); // big delta
-        assert_eq!(wrap_index(2, 4, -7), 3); // big negative delta
-    }
-}
+#[path = "tests/util.rs"]
+mod tests;

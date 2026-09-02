@@ -1,0 +1,7 @@
+[package]
+name = "cmux-term"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+alacritty_terminal = { workspace = true }

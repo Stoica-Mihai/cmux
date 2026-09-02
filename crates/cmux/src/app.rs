@@ -1,7 +1,8 @@
 use anyhow::Result;
 use ratatui::layout::Rect;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::connect_mode::{DaemonHandle, SpawnMailbox};
 use crate::session::Session;
@@ -10,7 +11,7 @@ pub enum Mode {
     Dashboard,
     Spawn(SpawnState),
     Rename(RenameState),
-    Picker(PickerState),
+    Picker(Box<PickerState>),
     ConfirmDetach(u64),
     Scrollback(u64),
     Help,
@@ -22,6 +23,15 @@ pub struct RenameState {
     pub buf: String,
 }
 
+/// Transcript lines shown in the preview pane.
+const PREVIEW_LINES: usize = 40;
+
+/// What the picker's background thread collects in one pass.
+struct Scan {
+    transcripts: Vec<crate::transcripts::Transcript>,
+    background: std::collections::HashMap<String, crate::claude_sessions::Background>,
+}
+
 pub struct PickerState {
     pub all: Vec<crate::transcripts::Transcript>,
     pub items: Vec<usize>,
@@ -29,39 +39,150 @@ pub struct PickerState {
     pub dangerous: bool,
     pub filter: String,
     pub previews: std::collections::HashMap<String, String>,
+    /// True from construction until the directory scan lands.
+    pub scanning: bool,
+    /// Live background sessions, keyed by session id.
+    background: std::collections::HashMap<String, crate::claude_sessions::Background>,
+    scan_rx: Receiver<Scan>,
+    preview_tx: Sender<(String, PathBuf)>,
+    preview_rx: Receiver<(String, String)>,
+    requested: std::collections::HashSet<String>,
 }
 
 impl PickerState {
+    /// Starts the directory scan and the preview reader on their own threads.
+    /// Both end when the returned state is dropped.
     pub fn new() -> Self {
-        let all = crate::transcripts::scan();
-        let items = (0..all.len()).collect();
-        let mut s = Self {
-            all,
-            items,
+        let (scan_tx, scan_rx) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("picker-scan".into())
+            .spawn(move || {
+                let _ = scan_tx.send(Scan {
+                    transcripts: crate::transcripts::scan(),
+                    background: crate::claude_sessions::live_background(),
+                });
+            });
+
+        let (preview_tx, req_rx) = mpsc::channel::<(String, PathBuf)>();
+        let (res_tx, preview_rx) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("picker-preview".into())
+            .spawn(move || {
+                while let Ok((id, path)) = req_rx.recv() {
+                    let text = crate::transcripts::load_preview(&path, PREVIEW_LINES);
+                    if res_tx.send((id, text)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+        Self {
+            all: Vec::new(),
+            items: Vec::new(),
             selected: 0,
             dangerous: false,
             filter: String::new(),
             previews: std::collections::HashMap::new(),
-        };
-        s.ensure_preview();
-        s
+            background: std::collections::HashMap::new(),
+            scanning: true,
+            scan_rx,
+            preview_tx,
+            preview_rx,
+            requested: std::collections::HashSet::new(),
+        }
     }
+
+    /// Takes the scan result and any finished previews. Reports whether
+    /// anything arrived.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        if self.scanning {
+            match self.scan_rx.try_recv() {
+                Ok(scan) => {
+                    self.all = scan.transcripts;
+                    self.background = scan.background;
+                    self.scanning = false;
+                    self.apply_filter();
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.scanning = false;
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        while let Ok((id, text)) = self.preview_rx.try_recv() {
+            self.previews.insert(id, text);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn current(&self) -> Option<&crate::transcripts::Transcript> {
         self.items.get(self.selected).and_then(|i| self.all.get(*i))
     }
+
+    /// The short id claude is running this conversation under, for a
+    /// conversation it is running in the background.
+    pub fn running_as(&self, t: &crate::transcripts::Transcript) -> Option<&str> {
+        self.background
+            .get(&t.session_id)
+            .map(|bg| bg.job_id.as_str())
+    }
+
+    /// The name to show for a conversation: claude's own, while it runs the
+    /// session in the background, otherwise the transcript's `--name` title.
+    /// A running fork carries its origin in claude's name, which the
+    /// transcript title predates.
+    pub fn display_name<'a>(&'a self, t: &'a crate::transcripts::Transcript) -> Option<&'a str> {
+        self.background
+            .get(&t.session_id)
+            .and_then(|bg| bg.name.as_deref())
+            .or(t.custom_title.as_deref())
+    }
+
+    /// The session a conversation was forked from. A transcript records its own
+    /// origin; a background session's sits in claude's job state instead, and
+    /// only one of the two is ever present.
+    pub fn fork_origin<'a>(&'a self, t: &'a crate::transcripts::Transcript) -> Option<&'a str> {
+        t.forked_from.as_deref().or_else(|| {
+            self.background
+                .get(&t.session_id)
+                .and_then(|bg| bg.forked_from.as_deref())
+        })
+    }
+
+    /// The origin of a forked conversation, named the way its own row is
+    /// named, falling back to the leading digits of its session id.
+    pub fn forked_from(&self, t: &crate::transcripts::Transcript) -> Option<String> {
+        let parent_id = self.fork_origin(t)?;
+        let parent = self.all.iter().find(|p| p.session_id == parent_id);
+        let named = parent
+            .and_then(|p| self.display_name(p))
+            .map(str::to_string);
+        Some(named.unwrap_or_else(|| crate::transcripts::short_id(parent_id).to_string()))
+    }
     pub fn move_sel(&mut self, delta: i32) {
         self.selected = crate::util::wrap_index(self.selected, self.items.len(), delta);
-        self.ensure_preview();
+        self.request_preview();
     }
-    pub fn ensure_preview(&mut self) {
-        let Some(t) = self.current() else { return };
-        if self.previews.contains_key(&t.session_id) {
+
+    /// Queues the selected transcript's preview, once per session.
+    pub fn request_preview(&mut self) {
+        let Some((id, path)) = self
+            .current()
+            .map(|t| (t.session_id.clone(), t.path.clone()))
+        else {
+            return;
+        };
+        if self.previews.contains_key(&id) || !self.requested.insert(id.clone()) {
             return;
         }
-        let id = t.session_id.clone();
-        let path = dirs_path(&t.cwd, &id);
-        let text = crate::transcripts::load_preview(&path, 40);
-        self.previews.insert(id, text);
+        if self.preview_tx.send((id.clone(), path)).is_err() {
+            self.previews
+                .insert(id, "(preview unavailable)".to_string());
+        }
     }
     pub fn apply_filter(&mut self) {
         let q = self.filter.to_lowercase();
@@ -76,7 +197,7 @@ impl PickerState {
                     if t.cwd.display().to_string().to_lowercase().contains(&q) {
                         return true;
                     }
-                    if let Some(name) = &t.custom_title
+                    if let Some(name) = self.display_name(t)
                         && name.to_lowercase().contains(&q)
                     {
                         return true;
@@ -89,15 +210,30 @@ impl PickerState {
         if self.selected >= self.items.len() {
             self.selected = self.items.len().saturating_sub(1);
         }
-        self.ensure_preview();
+        self.request_preview();
     }
 }
 
-fn dirs_path(cwd: &Path, session_id: &str) -> PathBuf {
-    crate::util::claude_projects_dir()
-        .unwrap_or_default()
-        .join(crate::transcripts::slug_encode(cwd))
-        .join(format!("{}.jsonl", session_id))
+/// The directories of one folder, read off the main thread.
+struct Listing {
+    cwd: PathBuf,
+    entries: Vec<PathBuf>,
+    /// Directory to select once the listing lands, for a step back up.
+    select: Option<std::ffi::OsString>,
+}
+
+/// Visible sub-directories of `cwd`, sorted, dotfiles omitted.
+fn read_dirs(cwd: &PathBuf) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(cwd)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    entries
 }
 
 pub struct SpawnState {
@@ -105,30 +241,87 @@ pub struct SpawnState {
     pub entries: Vec<PathBuf>,
     pub selected: usize,
     pub dangerous: bool,
+    /// True until the listing for `cwd` lands.
+    pub reading: bool,
+    req_tx: Sender<Listing>,
+    res_rx: Receiver<Listing>,
 }
 
 impl SpawnState {
+    /// Reads the starting folder on a worker thread. `read_dir` on the main
+    /// thread stalled the whole TUI for as long as the folder took to list,
+    /// which on a network mount or a huge directory is visible.
     pub fn new(start: PathBuf) -> Self {
+        let (req_tx, req_rx) = mpsc::channel::<Listing>();
+        let (res_tx, res_rx) = mpsc::channel::<Listing>();
+        let _ = std::thread::Builder::new()
+            .name("spawn-browser".into())
+            .spawn(move || {
+                while let Ok(mut job) = req_rx.recv() {
+                    job.entries = read_dirs(&job.cwd);
+                    if res_tx.send(job).is_err() {
+                        break;
+                    }
+                }
+            });
+
         let mut s = Self {
             cwd: start,
             entries: Vec::new(),
             selected: 0,
             dangerous: false,
+            reading: false,
+            req_tx,
+            res_rx,
         };
-        s.refresh();
+        s.request(s.cwd.clone(), None);
         s
     }
 
-    pub fn refresh(&mut self) {
-        self.entries = std::fs::read_dir(&self.cwd)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-            .map(|e| e.path())
-            .collect();
-        self.entries.sort();
+    /// Queue a folder for the worker. A dead worker falls back to reading it
+    /// here, so the browser still works rather than showing nothing.
+    fn request(&mut self, cwd: PathBuf, select: Option<std::ffi::OsString>) {
+        let job = Listing {
+            cwd: cwd.clone(),
+            entries: Vec::new(),
+            select: select.clone(),
+        };
+        if self.req_tx.send(job).is_err() {
+            self.entries = read_dirs(&cwd);
+            self.settle(select);
+            return;
+        }
+        self.entries.clear();
+        self.selected = 0;
+        self.reading = true;
+    }
+
+    /// Take a finished listing. Reports whether anything arrived.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(job) = self.res_rx.try_recv() {
+            // A listing for a folder already stepped away from is stale.
+            if job.cwd != self.cwd {
+                continue;
+            }
+            self.entries = job.entries;
+            self.reading = false;
+            self.settle(job.select);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Put the cursor on the folder just stepped out of, or the first row.
+    fn settle(&mut self, select: Option<std::ffi::OsString>) {
+        self.reading = false;
+        self.selected = select
+            .and_then(|name| {
+                self.entries
+                    .iter()
+                    .position(|p| p.file_name() == Some(&name))
+            })
+            .unwrap_or(0);
         if self.selected >= self.entries.len() {
             self.selected = self.entries.len().saturating_sub(1);
         }
@@ -140,26 +333,16 @@ impl SpawnState {
 
     pub fn descend(&mut self) {
         if let Some(target) = self.entries.get(self.selected).cloned() {
-            self.cwd = target;
-            self.selected = 0;
-            self.refresh();
+            self.cwd = target.clone();
+            self.request(target, None);
         }
     }
 
     pub fn ascend(&mut self) {
         let came_from = self.cwd.file_name().map(|s| s.to_os_string());
-        if let Some(p) = self.cwd.parent() {
-            self.cwd = p.to_path_buf();
-            self.selected = 0;
-            self.refresh();
-            if let Some(name) = came_from
-                && let Some(idx) = self
-                    .entries
-                    .iter()
-                    .position(|p| p.file_name() == Some(&name))
-            {
-                self.selected = idx;
-            }
+        if let Some(p) = self.cwd.parent().map(|p| p.to_path_buf()) {
+            self.cwd = p.clone();
+            self.request(p, came_from);
         }
     }
 
@@ -268,10 +451,14 @@ impl App {
             // Daemon-backed spawn: queue a mailbox, send Request::SpawnSession,
             // block on the mailbox for the SessionSpawned info.
             let mb = SpawnMailbox::new();
-            daemon.pending_spawns.lock().unwrap().push_back(mb.clone());
+            daemon
+                .pending_spawns
+                .lock()
+                .map_err(|_| anyhow::anyhow!("spawn mailbox lock poisoned"))?
+                .push_back(mb.clone());
             daemon.request(cmux_proto::Request::SpawnSession {
                 cwd: cwd.clone(),
-                cmd: cmux_proto::claude_command(dangerous, resume.as_deref()),
+                cmd: crate::claude_sessions::open_command(dangerous, resume.as_deref()),
                 probe: cmux_proto::ProbeKind::Claude {
                     dangerous,
                     resume_id: resume.clone(),
@@ -298,10 +485,16 @@ impl App {
                 daemon.req_tx.clone(),
             );
             daemon.register_slot(info.id, slot);
-            // Subscribe so FrameDelta starts flowing for this session.
-            daemon.request(cmux_proto::Request::Subscribe {
+            // Subscribe so FrameDelta starts flowing for this session. A
+            // failure here used to return with the daemon holding a spawned
+            // session and this client holding a slot for it, but no row in
+            // the sidebar to reach either from.
+            if let Err(e) = daemon.request(cmux_proto::Request::Subscribe {
                 session_id: info.id,
-            })?;
+            }) {
+                daemon.forget_slot(info.id);
+                return Err(e);
+            }
             sess
         } else {
             Session::spawn(id, label, cwd, dangerous, rows, cols, resume)?
@@ -339,13 +532,20 @@ impl App {
             daemon.req_tx.clone(),
         );
         daemon.register_slot(info.id, slot);
-        daemon.request(cmux_proto::Request::Subscribe {
-            session_id: info.id,
-        })?;
-        daemon.request(cmux_proto::Request::Attach {
-            session_id: info.id,
-            want_history: true,
-        })?;
+        let wired = daemon
+            .request(cmux_proto::Request::Subscribe {
+                session_id: info.id,
+            })
+            .and_then(|()| {
+                daemon.request(cmux_proto::Request::Attach {
+                    session_id: info.id,
+                    want_history: true,
+                })
+            });
+        if let Err(e) = wired {
+            daemon.forget_slot(info.id);
+            return Err(e);
+        }
         self.sessions.push(sess);
         Ok(())
     }
@@ -390,275 +590,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::Session;
-    use std::sync::mpsc;
-
-    fn daemon_session(id: u64, label: &str) -> Session {
-        let (tx, _rx) = mpsc::channel();
-        Session::new_daemon(
-            id,
-            label.into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            id,
-            tx,
-        )
-        .0
-    }
-
-    fn app_with(n: u64) -> App {
-        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
-        for i in 1..=n {
-            app.sessions.push(daemon_session(i, &format!("s{i}")));
-        }
-        app
-    }
-
-    /// A scratch tree of directories, named so the caller can predict the sort.
-    fn dir_tree(tag: &str, names: &[&str]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("cmux-app-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        for name in names {
-            std::fs::create_dir_all(root.join(name)).expect("mkdir");
-        }
-        root
-    }
-
-    #[test]
-    fn cycling_focus_wraps_in_both_directions() {
-        let mut app = app_with(3);
-        app.focus = 0;
-        app.cycle_focus(-1);
-        assert_eq!(app.focus, 2, "going back from the first should wrap to last");
-        app.cycle_focus(1);
-        assert_eq!(app.focus, 0, "going on from the last should wrap to first");
-    }
-
-    #[test]
-    fn cycling_focus_with_no_sessions_stays_put() {
-        let mut app = app_with(0);
-        app.cycle_focus(1);
-        assert_eq!(app.focus, 0, "an empty list has nothing to focus");
-    }
-
-    #[test]
-    fn detaching_the_last_tile_moves_focus_back_and_leaves_no_gap() {
-        let mut app = app_with(3);
-        app.focus = 2;
-        app.detach_focused();
-        assert_eq!(app.sessions.len(), 2);
-        assert_eq!(app.focus, 1, "focus should follow the list in, not dangle");
-    }
-
-    #[test]
-    fn detaching_the_only_tile_returns_to_the_dashboard() {
-        let mut app = app_with(1);
-        app.focus = 0;
-        app.mode = Mode::Scrollback(1);
-        app.detach_focused();
-        assert!(app.sessions.is_empty());
-        assert!(
-            matches!(app.mode, Mode::Dashboard),
-            "with nothing left there is no session mode to stay in"
-        );
-    }
-
-    #[test]
-    fn a_new_tile_never_gets_a_degenerate_size() {
-        // Small enough that the naive arithmetic would underflow to zero.
-        let mut app = App::new(PathBuf::from("/tmp"), (4, 12));
-        for n in 0..8 {
-            let (rows, cols) = app.tile_size_for_new();
-            assert!(rows >= 4, "tile {n} got {rows} rows");
-            assert!(cols >= 10, "tile {n} got {cols} cols");
-            app.sessions.push(daemon_session(n + 1, "s"));
-        }
-    }
-
-    #[test]
-    fn tiles_shrink_as_the_grid_fills() {
-        let mut app = App::new(PathBuf::from("/tmp"), (60, 200));
-        let one = app.tile_size_for_new();
-        for i in 1..=4 {
-            app.sessions.push(daemon_session(i, "s"));
-        }
-        let five = app.tile_size_for_new();
-        assert!(
-            five.0 < one.0 && five.1 < one.1,
-            "a fifth tile should be smaller than the first: {one:?} then {five:?}"
-        );
-    }
-
-    #[test]
-    fn the_directory_picker_lists_only_visible_directories() {
-        let root = dir_tree("visible", &["alpha", "beta", ".hidden"]);
-        std::fs::write(root.join("a-file"), b"x").expect("write");
-        let state = SpawnState::new(root.clone());
-        let names: Vec<String> = state
-            .entries
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["alpha", "beta"], "got {names:?}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn descending_then_ascending_lands_back_on_the_directory_left() {
-        let root = dir_tree("updown", &["alpha", "beta", "gamma"]);
-        let mut state = SpawnState::new(root.clone());
-        state.move_sel(1);
-        let target = state.pick();
-        state.descend();
-        assert_eq!(state.cwd, target, "descend should enter the selection");
-        state.ascend();
-        assert_eq!(state.cwd, root);
-        assert_eq!(
-            state.pick(),
-            target,
-            "ascending should reselect the directory just left"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn picking_in_an_empty_directory_falls_back_to_that_directory() {
-        let root = dir_tree("empty", &[]);
-        std::fs::create_dir_all(&root).expect("mkdir");
-        let state = SpawnState::new(root.clone());
-        assert!(state.entries.is_empty());
-        assert_eq!(state.pick(), root, "with nothing listed, pick the cwd");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn transcript(cwd: &str, title: Option<&str>, id: &str) -> crate::transcripts::Transcript {
-        crate::transcripts::Transcript {
-            session_id: id.to_string(),
-            cwd: PathBuf::from(cwd),
-            mtime: std::time::SystemTime::UNIX_EPOCH,
-            file_size: 0,
-            custom_title: title.map(str::to_string),
-        }
-    }
-
-    fn picker_with(items: Vec<crate::transcripts::Transcript>) -> PickerState {
-        let n = items.len();
-        PickerState {
-            all: items,
-            items: (0..n).collect(),
-            selected: 0,
-            dangerous: false,
-            filter: String::new(),
-            previews: std::collections::HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn the_picker_filter_matches_path_and_title_case_insensitively() {
-        let mut p = picker_with(vec![
-            transcript("/home/u/Alpha", None, "a"),
-            transcript("/home/u/beta", Some("Gamma work"), "b"),
-            transcript("/home/u/delta", None, "c"),
-        ]);
-
-        p.filter = "ALPHA".into();
-        p.apply_filter();
-        assert_eq!(p.items, vec![0], "path match should ignore case");
-
-        p.filter = "gamma".into();
-        p.apply_filter();
-        assert_eq!(p.items, vec![1], "the custom title should match too");
-
-        p.filter = "nothing-here".into();
-        p.apply_filter();
-        assert!(p.items.is_empty());
-    }
-
-    #[test]
-    fn clearing_the_picker_filter_restores_every_item() {
-        let mut p = picker_with(vec![
-            transcript("/a", None, "a"),
-            transcript("/b", None, "b"),
-        ]);
-        p.filter = "a".into();
-        p.apply_filter();
-        assert_eq!(p.items, vec![0]);
-        p.filter.clear();
-        p.apply_filter();
-        assert_eq!(p.items, vec![0, 1]);
-    }
-
-    /// Filtering down to fewer items than the current selection index used to
-    /// leave `selected` pointing past the end.
-    #[test]
-    fn filtering_pulls_the_selection_back_into_range() {
-        let mut p = picker_with(vec![
-            transcript("/a", None, "a"),
-            transcript("/b", None, "b"),
-            transcript("/c", None, "c"),
-        ]);
-        p.selected = 2;
-        p.filter = "/a".into();
-        p.apply_filter();
-        assert!(
-            p.selected < p.items.len().max(1),
-            "selected {} is past the {} remaining items",
-            p.selected,
-            p.items.len()
-        );
-        assert!(p.current().is_some(), "the selection should resolve");
-    }
-
-    #[test]
-    fn an_empty_picker_has_nothing_current_and_survives_moving() {
-        let mut p = picker_with(Vec::new());
-        assert!(p.current().is_none());
-        p.move_sel(1);
-        p.move_sel(-1);
-        assert!(p.current().is_none());
-    }
-
-    /// Detach must remove the tile *and* end the session. While it only
-    /// dropped the handle, a daemon-hosted session stayed alive and kept
-    /// showing up in every other client, the browser included.
-    #[test]
-    fn detaching_ends_the_session_on_the_daemon_too() {
-        let (tx, rx) = mpsc::channel();
-        let (sess, _slot) = Session::new_daemon(
-            1,
-            "s".into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            5,
-            tx,
-        );
-        let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
-        app.sessions.push(sess);
-        app.focus = 0;
-
-        app.detach_focused();
-
-        assert!(app.sessions.is_empty(), "the tile should be gone");
-        match rx.try_recv() {
-            Ok(cmux_proto::Request::Detach {
-                session_id,
-                keep_session,
-            }) => {
-                assert_eq!(session_id, 5);
-                assert!(!keep_session, "detach must end it, not park it");
-            }
-            Ok(other) => panic!("expected Detach, got {other:?}"),
-            Err(_) => panic!("the daemon was never told; the session leaks"),
-        }
-    }
-}
+#[path = "tests/app.rs"]
+mod tests;

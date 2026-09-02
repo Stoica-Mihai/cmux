@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cmux",
     "crates/cmux-proto",
+    "crates/cmux-term",
     "crates/cmuxd",
 ]
 

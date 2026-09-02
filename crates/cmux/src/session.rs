@@ -16,22 +16,35 @@ use std::thread::{self, JoinHandle};
 
 use crate::debug_log;
 use crate::term_render::{self, TermSize, TileSelection};
-use crate::util::{claude_sessions_dir, now_ms};
+use crate::util::now_ms;
 
-const SCROLLBACK_LINES: usize = 4096;
-const RING_BYTES_CAP: usize = 1_048_576; // 1 MiB raw PTY history per session
+use cmux_proto::{RING_BYTES_CAP, SCROLLBACK_LINES};
+
+/// Deeper than a live session's grid: a replay walks the whole ring, so the
+/// history it rebuilds is bounded by the ring rather than the screen.
 const REPLAY_HISTORY_LINES: usize = 16_384;
 
-const PROMPT_NEEDLES: &[&str] = &[
-    "do you want to proceed",
-    "allow this",
-    "apply this edit",
-    "requires approval",
-    "don't ask again",
-    "esc to cancel",
-];
-
 pub use cmux_proto::SessionStatus;
+
+/// Waiting for the repaint a sent scroll asked for. The child answers
+/// asynchronously, so a quiet frame right after sending means "nothing has
+/// arrived yet", not "the repaint is done" — the two have to be told apart or
+/// the screen matched is the one from before the scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StitchWait {
+    /// When the scroll went out, so a child that ignores the wheel does not
+    /// wedge the drag.
+    pub sent_ms: u64,
+    /// Whether any bytes have come back yet.
+    pub answered: bool,
+}
+
+/// A selection in copy-buffer coordinates: a line index and a column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragRange {
+    pub anchor: (usize, u16),
+    pub tip: (usize, u16),
+}
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize {
@@ -211,6 +224,20 @@ pub struct Session {
     pub manually_renamed: bool,
     pub selection: Option<TileSelection>,
     pub mouse_down_at: Option<(u16, u16)>,
+    /// Output collected across scrolls while a selection is being dragged, so
+    /// the selection can span more than the one screen the grid holds.
+    pub copy: Option<crate::copy_buffer::CopyBuffer>,
+    /// The selection in buffer lines, which is the authoritative one.
+    /// `selection` is projected from it onto whatever is currently on screen.
+    pub drag: Option<DragRange>,
+    /// Where a sent scroll has got to, if one is outstanding.
+    pub stitch: Option<StitchWait>,
+    /// The edge a drag is being held against: `Some(true)` for the top.
+    /// A pointer held still sends no further events, so the scroll has to
+    /// repeat on the event loop's clock rather than on mouse motion.
+    pub drag_edge: Option<bool>,
+    /// When the last edge scroll was sent.
+    pub last_edge_scroll_ms: u64,
     last_status_check_ms: u64,
     last_perm_check_active_ms: u64,
     daemon_pending_status: Option<Arc<Mutex<Option<PendingStatus>>>>,
@@ -235,7 +262,7 @@ impl Session {
             .openpty(pty_size(rows, cols))
             .context("openpty")?;
 
-        let argv = cmux_proto::claude_command(dangerous, resume.as_deref());
+        let argv = crate::claude_sessions::open_command(dangerous, resume.as_deref());
         let mut cmd = CommandBuilder::new(&argv[0]);
         for arg in &argv[1..] {
             cmd.arg(arg);
@@ -314,6 +341,11 @@ impl Session {
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
+            copy: None,
+            drag: None,
+            stitch: None,
+            drag_edge: None,
+            last_edge_scroll_ms: 0,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             daemon_pending_status: None,
@@ -382,6 +414,11 @@ impl Session {
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
+            copy: None,
+            drag: None,
+            stitch: None,
+            drag_edge: None,
+            last_edge_scroll_ms: 0,
             last_status_check_ms: 0,
             last_perm_check_active_ms: 0,
             daemon_pending_status: Some(pending_status),
@@ -445,27 +482,19 @@ impl Session {
             return;
         }
 
-        if let Some(pid) = self.pid {
-            let path = claude_sessions_dir().map(|d| d.join(format!("{}.json", pid)));
-            if let Some(path) = path
-                && let Ok(bytes) = std::fs::read(&path)
-                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        if let Some(record) = self.pid.and_then(cmux_proto::ClaudeSessionRecord::read) {
+            if let Some(next) = record.status
+                && self.status != next
             {
-                if let Some(s) = v.get("status").and_then(|x| x.as_str()) {
-                    let next = SessionStatus::from_status_str(s);
-                    if self.status != next {
-                        self.status = next;
-                    }
+                self.status = next;
+            }
+            if let Some(n) = record.name
+                && self.claude_name.as_deref() != Some(n.as_str())
+            {
+                if !self.manually_renamed {
+                    self.label = n.clone();
                 }
-                if let Some(n) = v.get("name").and_then(|x| x.as_str())
-                    && !n.is_empty()
-                    && self.claude_name.as_deref() != Some(n)
-                {
-                    if !self.manually_renamed {
-                        self.label = n.to_string();
-                    }
-                    self.claude_name = Some(n.to_string());
-                }
+                self.claude_name = Some(n);
             }
         }
 
@@ -481,18 +510,17 @@ impl Session {
             return false;
         };
         let text = term_render::visible_text(&p.term);
+        let prompt = cmux_proto::is_permission_prompt(&text);
+        // One line per scan. Appending the whole screen every time grew the
+        // file without bound for as long as the session ran.
         debug_log!(
-            &format!("/tmp/cmux-screen-{}.txt", self.id),
-            "\n========= scan at id={} =========\n{}\n",
+            "/tmp/cmux-scan.log",
+            "id={} chars={} prompt={}",
             self.id,
-            text
+            text.len(),
+            prompt
         );
-        let lower = text.to_lowercase();
-        if PROMPT_NEEDLES.iter().any(|n| lower.contains(n)) {
-            return true;
-        }
-        let has_yes = lower.contains("1. yes");
-        has_yes && (lower.contains("2. no") || lower.contains("3. no"))
+        prompt
     }
 
     pub fn activity_age_ms(&self) -> u64 {
@@ -553,17 +581,26 @@ impl Session {
         if rows == 0 || cols == 0 {
             return;
         }
-        let current = self.parser.lock().ok().map(|p| {
-            (
-                p.term.grid().screen_lines() as u16,
-                p.term.grid().columns() as u16,
-            )
-        });
-        if current == Some((rows, cols)) {
+        // One lock for the comparison and the resize. Reading the size under
+        // one and resizing under another let two callers both see a mismatch
+        // and both resize, each asking the daemon for a fresh repaint.
+        let resized = match self.parser.lock() {
+            Ok(mut p) => {
+                let current = (
+                    p.term.grid().screen_lines() as u16,
+                    p.term.grid().columns() as u16,
+                );
+                if current == (rows, cols) {
+                    false
+                } else {
+                    p.resize(rows, cols);
+                    true
+                }
+            }
+            Err(_) => return,
+        };
+        if !resized {
             return;
-        }
-        if let Ok(mut p) = self.parser.lock() {
-            p.resize(rows, cols);
         }
         // Ask for a repaint at the new size. The program may have already
         // drawn before this client knew, or may not redraw at all, and either
@@ -650,180 +687,5 @@ impl Drop for Session {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn daemon_session(remote_id: u64) -> (Session, mpsc::Receiver<ProtoRequest>) {
-        let (tx, rx) = mpsc::channel();
-        let (sess, _slot) = Session::new_daemon(
-            1,
-            "s".into(),
-            PathBuf::from("/tmp"),
-            false,
-            None,
-            24,
-            80,
-            None,
-            remote_id,
-            tx,
-        );
-        (sess, rx)
-    }
-
-    /// The confirm dialog promises the process will be killed. Dropping a
-    /// daemon-backed handle does not do that, so kill() has to say so — or the
-    /// session lives on, still listed by every other client.
-    #[test]
-    fn killing_a_daemon_session_ends_it_for_everyone() {
-        let (mut sess, rx) = daemon_session(42);
-        sess.kill();
-        match rx.try_recv().expect("kill should send a request") {
-            ProtoRequest::Detach {
-                session_id,
-                keep_session,
-            } => {
-                assert_eq!(session_id, 42);
-                assert!(!keep_session, "kill must end the session, not park it");
-            }
-            other => panic!("expected Detach, got {other:?}"),
-        }
-    }
-
-    /// The opposite case: quitting the TUI must leave sessions running.
-    #[test]
-    fn detach_keep_parks_the_session() {
-        let (mut sess, rx) = daemon_session(7);
-        sess.detach_keep();
-        match rx.try_recv().expect("detach_keep should send a request") {
-            ProtoRequest::Detach {
-                session_id,
-                keep_session,
-            } => {
-                assert_eq!(session_id, 7);
-                assert!(keep_session, "quitting must not kill the sessions");
-            }
-            other => panic!("expected Detach, got {other:?}"),
-        }
-    }
-
-    /// A client asks for a size; the pty runs at the smallest asked for by
-    /// anyone. Rendering at the requested size instead leaves every row past
-    /// the pty's height showing output from before the shrink.
-    #[test]
-    fn a_daemon_session_renders_at_the_effective_size_not_the_requested_one() {
-        use alacritty_terminal::grid::Dimensions;
-        let (mut sess, rx) = daemon_session(9);
-        let grid = |s: &Session| {
-            let p = s.parser.lock().expect("parser");
-            (
-                p.term.grid().screen_lines() as u16,
-                p.term.grid().columns() as u16,
-            )
-        };
-        assert_eq!(grid(&sess), (24, 80));
-
-        sess.resize(40, 120).expect("resize");
-        assert_eq!(
-            grid(&sess),
-            (24, 80),
-            "the grid followed this client's request instead of the pty"
-        );
-        match rx
-            .try_recv()
-            .expect("the request should still reach the daemon")
-        {
-            ProtoRequest::Resize { rows, cols, .. } => assert_eq!((rows, cols), (40, 120)),
-            other => panic!("expected Resize, got {other:?}"),
-        }
-
-        sess.apply_effective_size(26, 84);
-        assert_eq!(grid(&sess), (26, 84));
-
-        // …and asks the daemon to repaint, because the grid it just resized
-        // holds reflowed leftovers of the old width.
-        match rx.try_recv().expect("a repaint should have been requested") {
-            ProtoRequest::Attach { session_id, .. } => assert_eq!(session_id, 9),
-            other => panic!("expected Attach, got {other:?}"),
-        }
-    }
-
-    fn stripped(input: &str) -> String {
-        String::from_utf8(strip_alt_screen(input.as_bytes())).expect("utf8")
-    }
-
-    #[test]
-    fn each_alt_screen_sequence_is_stripped_on_its_own() {
-        for seq in [
-            "\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1047h", "\x1b[?1047l",
-        ] {
-            assert_eq!(
-                stripped(&format!("a{seq}b")),
-                "ab",
-                "{seq:?} survived the strip"
-            );
-        }
-    }
-
-    /// Terminfo's smcup often sets several private modes in one sequence, so
-    /// matching the parameter list whole misses the alt-screen switch inside it.
-    /// 1048 is save-cursor, not a buffer switch, so it stays.
-    #[test]
-    fn an_alt_screen_parameter_is_stripped_out_of_a_combined_sequence() {
-        assert_eq!(stripped("a\x1b[?1047;1048;1049hb"), "a\x1b[?1048hb");
-        assert_eq!(stripped("a\x1b[?1049;47lb"), "ab");
-    }
-
-    /// Only the alt-screen parameters go; the rest of the sequence has to
-    /// survive, or replay loses bracketed paste, mouse reporting and the like.
-    #[test]
-    fn the_other_parameters_of_a_combined_sequence_survive() {
-        assert_eq!(stripped("a\x1b[?1049;2004hb"), "a\x1b[?2004hb");
-        assert_eq!(stripped("a\x1b[?1000;1049;2004lb"), "a\x1b[?1000;2004lb");
-    }
-
-    #[test]
-    fn sequences_that_are_not_alt_screen_are_left_alone() {
-        for seq in [
-            "\x1b[?25l",
-            "\x1b[?2004h",
-            "\x1b[H",
-            "\x1b[2J",
-            "\x1b[1;31m",
-            "\x1b[?10491h",
-            "\x1b[?104h",
-        ] {
-            assert_eq!(
-                stripped(&format!("a{seq}b")),
-                format!("a{seq}b"),
-                "{seq:?} was stripped but is not an alt-screen switch"
-            );
-        }
-    }
-
-    #[test]
-    fn a_truncated_escape_at_the_end_is_kept_verbatim() {
-        for tail in ["\x1b", "\x1b[", "\x1b[?", "\x1b[?1049"] {
-            assert_eq!(stripped(&format!("a{tail}")), format!("a{tail}"));
-        }
-    }
-
-    #[test]
-    fn plain_text_passes_through_untouched() {
-        assert_eq!(stripped(""), "");
-        assert_eq!(stripped("hello\r\nworld"), "hello\r\nworld");
-    }
-
-    #[test]
-    fn renaming_a_daemon_session_tells_the_daemon() {
-        let (mut sess, rx) = daemon_session(3);
-        sess.set_label("renamed".into());
-        assert_eq!(sess.label, "renamed");
-        match rx.try_recv().expect("set_label should send a request") {
-            ProtoRequest::Rename { session_id, label } => {
-                assert_eq!(session_id, 3);
-                assert_eq!(label, "renamed");
-            }
-            other => panic!("expected Rename, got {other:?}"),
-        }
-    }
-}
+#[path = "tests/session.rs"]
+mod tests;

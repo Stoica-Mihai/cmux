@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 cmux-proto = { path = "../cmux-proto" }
+cmux-term = { path = "../cmux-term" }
 alacritty_terminal = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
