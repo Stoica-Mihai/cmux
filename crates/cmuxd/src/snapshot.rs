@@ -43,6 +43,41 @@ impl Default for Pen {
     }
 }
 
+/// The DEC private modes that decide how input reaches the program, as set
+/// sequences. Anything not set is left alone: a client starts with them off.
+fn input_modes(term: &Term<VoidListener>) -> String {
+    let mode = term.mode();
+    let mut out = String::new();
+    for (flag, code) in [
+        (TermMode::MOUSE_REPORT_CLICK, "1000"),
+        (TermMode::MOUSE_DRAG, "1002"),
+        (TermMode::MOUSE_MOTION, "1003"),
+        (TermMode::SGR_MOUSE, "1006"),
+        (TermMode::UTF8_MOUSE, "1005"),
+        (TermMode::ALTERNATE_SCROLL, "1007"),
+        (TermMode::BRACKETED_PASTE, "2004"),
+        (TermMode::FOCUS_IN_OUT, "1004"),
+        (TermMode::APP_CURSOR, "1"),
+    ] {
+        if mode.contains(flag) {
+            let _ = write!(out, "\x1b[?{code}h");
+        }
+    }
+    out
+}
+
+/// Whether a row ends in a wrap into the row below.
+fn wraps(
+    grid: &alacritty_terminal::Grid<alacritty_terminal::term::cell::Cell>,
+    row: usize,
+) -> bool {
+    let cols = grid.columns();
+    cols > 0
+        && grid[Line(row as i32)][Column(cols - 1)]
+            .flags
+            .contains(Flags::WRAPLINE)
+}
+
 /// Escape sequences that reproduce the visible grid, its pen, and the cursor.
 pub(crate) fn render(term: &Term<VoidListener>) -> Vec<u8> {
     let grid = term.grid();
@@ -55,29 +90,61 @@ pub(crate) fn render(term: &Term<VoidListener>) -> Vec<u8> {
     if is_alt_screen(term) {
         out.push_str("\x1b[?1049h");
     }
+    // Input modes the program turned on. A client that attaches later has to
+    // know them, or it cannot encode a mouse report the program will accept
+    // and its wheel and paste go nowhere.
+    out.push_str(&input_modes(term));
     out.push_str("\x1b[H\x1b[2J\x1b[m");
 
     let mut pen = Pen::default();
+    let mut link: Option<String> = None;
     for row in 0..rows {
-        if row > 0 {
+        // A row the program wrapped carries no break of its own: writing one
+        // makes the client's grid hold two logical lines, and a copy of the
+        // pair then pastes a sentence split at the tile's width.
+        if row > 0 && !wraps(grid, row - 1) {
             out.push_str("\r\n");
         }
         let line = Line(row as i32);
-        // Everything past the last written cell is already blank after the
-        // clear, so stopping early keeps the payload small.
-        let last = (0..cols)
-            .rev()
-            .find(|&col| {
-                let cell = &grid[line][Column(col)];
-                cell.c != ' '
-                    || cell.bg != Color::Named(NamedColor::Background)
-                    || cell.flags.contains(Flags::INVERSE)
-            })
-            .map(|c| c + 1)
-            .unwrap_or(0);
+        // A wrapped row is written at full width: the client's own wrap has to
+        // land on the same column, and its last cell may be the space between
+        // two words. Stopping early there glued them together.
+        let last = if wraps(grid, row) {
+            cols
+        } else {
+            // Everything past the last written cell is already blank after the
+            // clear, so stopping early keeps the payload small.
+            (0..cols)
+                .rev()
+                .find(|&col| {
+                    let cell = &grid[line][Column(col)];
+                    cell.c != ' '
+                        || cell.bg != Color::Named(NamedColor::Background)
+                        || cell.flags.contains(Flags::INVERSE)
+                })
+                .map(|c| c + 1)
+                .unwrap_or(0)
+        };
 
         for col in 0..last {
             let cell = &grid[line][Column(col)];
+            // The link opens on its first cell and closes on the first cell
+            // past it, so a run reaches the client as one link.
+            let want_link = cell
+                .hyperlink()
+                .map(|h| (h.id().to_string(), h.uri().to_string()));
+            let want_key = want_link
+                .as_ref()
+                .map(|(id, uri)| format!("{id}\u{1}{uri}"));
+            if want_key != link {
+                if link.is_some() {
+                    out.push_str("\x1b]8;;\x1b\\");
+                }
+                if let Some((id, uri)) = &want_link {
+                    let _ = write!(out, "\x1b]8;id={id};{uri}\x1b\\");
+                }
+                link = want_key;
+            }
             // The cell after a double-width char holds no glyph of its own.
             if cell
                 .flags
@@ -91,10 +158,18 @@ pub(crate) fn render(term: &Term<VoidListener>) -> Vec<u8> {
                 flags: cell.flags,
             };
             if want != pen {
-                out.push_str(&sgr(&want));
+                out.push_str(&cmux_term::sgr(
+                    to_cell_color(want.fg),
+                    to_cell_color(want.bg),
+                    want.flags,
+                ));
                 pen = want;
             }
             out.push(if cell.c == '\0' { ' ' } else { cell.c });
+        }
+        if link.is_some() {
+            out.push_str("\x1b]8;;\x1b\\");
+            link = None;
         }
         if pen != Pen::default() {
             out.push_str("\x1b[m");
@@ -110,154 +185,24 @@ pub(crate) fn render(term: &Term<VoidListener>) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Reset first, then set. Longer than a minimal diff and never wrong about
-/// what the previous pen left behind.
-fn sgr(pen: &Pen) -> String {
-    let mut parts: Vec<String> = vec!["0".into()];
-    for (flag, code) in [
-        (Flags::BOLD, "1"),
-        (Flags::DIM, "2"),
-        (Flags::ITALIC, "3"),
-        (Flags::INVERSE, "7"),
-        (Flags::HIDDEN, "8"),
-        (Flags::STRIKEOUT, "9"),
-    ] {
-        if pen.flags.contains(flag) {
-            parts.push(code.into());
-        }
-    }
-    if pen.flags.intersects(Flags::ALL_UNDERLINES) {
-        parts.push("4".into());
-    }
-    parts.push(color_sgr(pen.fg, true));
-    parts.push(color_sgr(pen.bg, false));
-    format!("\x1b[{}m", parts.join(";"))
-}
+#[cfg(test)]
+#[path = "tests/snapshot.rs"]
+mod tests;
 
-fn color_sgr(color: Color, foreground: bool) -> String {
-    let (basic, bright, extended, default) = if foreground {
-        (30, 90, 38, 39)
-    } else {
-        (40, 100, 48, 49)
-    };
+/// An alacritty colour resolved as far as the shared SGR encoder needs it.
+/// `Foreground`/`Background` and alacritty's dim variants have no portable
+/// code, so the terminal's own default is the honest answer.
+fn to_cell_color(color: Color) -> cmux_term::CellColor {
     match color {
-        Color::Spec(rgb) => format!("{extended};2;{};{};{}", rgb.r, rgb.g, rgb.b),
-        Color::Indexed(i) if i < 8 => format!("{}", basic + i as u16),
-        Color::Indexed(i) if i < 16 => format!("{}", bright + (i as u16 - 8)),
-        Color::Indexed(i) => format!("{extended};5;{i}"),
+        Color::Spec(rgb) => cmux_term::CellColor::Rgb(rgb.r, rgb.g, rgb.b),
+        Color::Indexed(i) => cmux_term::CellColor::Indexed(i),
         Color::Named(named) => {
             let n = named as usize;
-            if n < 8 {
-                format!("{}", basic + n as u16)
-            } else if n < 16 {
-                format!("{}", bright + (n - 8) as u16)
+            if n < 16 {
+                cmux_term::CellColor::Indexed(n as u8)
             } else {
-                // Foreground/Background and alacritty's dim variants have no
-                // portable code; the terminal's own default is the honest
-                // answer rather than a guessed palette entry.
-                format!("{default}")
+                cmux_term::CellColor::Default
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alacritty_terminal::term::Config as TermConfig;
-    use alacritty_terminal::vte::ansi::Processor;
-
-    use crate::session::TermSize;
-
-    fn term_of(rows: usize, cols: usize, input: &str) -> Term<VoidListener> {
-        let size = TermSize { lines: rows, cols };
-        let mut term = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut proc: Processor = Processor::new();
-        proc.advance(&mut term, input.replace('\n', "\r\n").as_bytes());
-        term
-    }
-
-    /// The property that matters: rendering a grid and feeding the result to a
-    /// fresh terminal reproduces the same grid. Anything the renderer drops or
-    /// mis-encodes shows up as a differing cell.
-    fn assert_round_trips(rows: usize, cols: usize, input: &str) {
-        let original = term_of(rows, cols, input);
-        let bytes = render(&original);
-
-        let size = TermSize { lines: rows, cols };
-        let mut replayed = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut proc: Processor = Processor::new();
-        proc.advance(&mut replayed, &bytes);
-
-        for row in 0..rows {
-            let line = Line(row as i32);
-            for col in 0..cols {
-                let a = &original.grid()[line][Column(col)];
-                let b = &replayed.grid()[line][Column(col)];
-                assert_eq!(
-                    (a.c, a.fg, a.bg, a.flags),
-                    (b.c, b.fg, b.bg, b.flags),
-                    "cell ({row},{col}) differs after a round trip\n\
-                     rendered: {:?}",
-                    String::from_utf8_lossy(&bytes)
-                );
-            }
-        }
-        assert_eq!(
-            original.grid().cursor.point,
-            replayed.grid().cursor.point,
-            "cursor moved during the round trip"
-        );
-    }
-
-    #[test]
-    fn plain_text_round_trips() {
-        assert_round_trips(6, 20, "hello\nworld");
-    }
-
-    #[test]
-    fn colours_and_attributes_round_trip() {
-        assert_round_trips(
-            6,
-            40,
-            "\x1b[31mred\x1b[0m \x1b[1;32mbold green\x1b[0m\n\
-             \x1b[44mblue bg\x1b[0m \x1b[3;4mitalic underline\x1b[0m",
-        );
-    }
-
-    #[test]
-    fn indexed_and_truecolour_round_trip() {
-        assert_round_trips(
-            4,
-            40,
-            "\x1b[38;5;208morange\x1b[0m \x1b[38;2;10;200;30mrgb\x1b[0m\n\
-             \x1b[48;5;27mon indexed\x1b[0m",
-        );
-    }
-
-    #[test]
-    fn a_full_screen_program_round_trips() {
-        // Enter the alt screen, paint, and leave the cursor somewhere odd.
-        let input = "\x1b[?1049h\x1b[2J\x1b[HTOP\n\x1b[7minverse row\x1b[0m\n\x1b[5;3H";
-        assert_round_trips(8, 30, input);
-        assert!(is_alt_screen(&term_of(8, 30, input)));
-    }
-
-    #[test]
-    fn the_alt_screen_is_re_entered_so_later_output_lands_there() {
-        let alt = term_of(5, 10, "\x1b[?1049hX");
-        assert!(render(&alt).starts_with(b"\x1b[?1049h"));
-
-        let primary = term_of(5, 10, "X");
-        assert!(!render(&primary).starts_with(b"\x1b[?1049h"));
-    }
-
-    #[test]
-    fn a_hidden_cursor_stays_hidden() {
-        let hidden = term_of(4, 10, "\x1b[?25lhi");
-        assert!(render(&hidden).ends_with(b"\x1b[?25l"));
-
-        let shown = term_of(4, 10, "hi");
-        assert!(!render(&shown).ends_with(b"\x1b[?25l"));
     }
 }
