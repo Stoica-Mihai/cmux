@@ -43,5 +43,9 @@ fn ctrl_v_and_alt_v_reach_the_child() {
     let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
     let alt_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
     assert_eq!(keys::encode(ctrl_v), Some(vec![0x16]), "ctrl+v is SYN");
-    assert_eq!(keys::encode(alt_v), Some(vec![0x1b, b'v']), "meta+v is ESC v");
+    assert_eq!(
+        keys::encode(alt_v),
+        Some(vec![0x1b, b'v']),
+        "meta+v is ESC v"
+    );
 }
