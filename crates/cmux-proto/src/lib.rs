@@ -71,14 +71,34 @@ pub fn terminal_spawn_env() -> Vec<(String, String)> {
     out
 }
 
+/// What a Claude Code session opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch<'a> {
+    /// A fresh conversation.
+    New,
+    /// A stored conversation, by session id.
+    Resume(&'a str),
+    /// A session claude is already running in the background, by the short id
+    /// `claude agents` lists.
+    Attach(&'a str),
+}
+
 /// argv for a Claude Code session. Single source of truth for the flags, so
-/// the local-PTY and daemon paths cannot drift apart.
-pub fn claude_command(dangerous: bool, resume_id: Option<&str>) -> Vec<String> {
+/// the local-PTY and daemon paths cannot drift apart. `claude attach` accepts
+/// no options, so the dangerous flag is dropped on that form.
+pub fn claude_command(dangerous: bool, launch: Launch<'_>) -> Vec<String> {
+    if let Launch::Attach(job_id) = launch {
+        return vec![
+            "claude".to_string(),
+            "attach".to_string(),
+            job_id.to_string(),
+        ];
+    }
     let mut cmd = vec!["claude".to_string()];
     if dangerous {
         cmd.push("--dangerously-skip-permissions".to_string());
     }
-    if let Some(id) = resume_id {
+    if let Launch::Resume(id) = launch {
         cmd.push("--resume".to_string());
         cmd.push(id.to_string());
     }
@@ -291,6 +311,115 @@ pub struct Envelope<T> {
 
 /// Maximum payload length the codec will accept (8 MiB). Sized to leave room
 /// for Snapshot variants without ballooning unbounded.
+/// One of claude's own session records, `~/.claude/sessions/<pid>.json`.
+/// claude writes one per live process; three places in cmux read it, so the
+/// field names live here rather than in each of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeSessionRecord {
+    pub pid: u32,
+    /// Start time in clock ticks, matched against `/proc/<pid>/stat` to tell a
+    /// live process from a reused pid.
+    pub proc_start: Option<String>,
+    pub session_id: Option<String>,
+    /// The short id `claude attach` and `claude stop` take.
+    pub job_id: Option<String>,
+    pub name: Option<String>,
+    pub status: Option<SessionStatus>,
+    /// `"kind":"bg"`: claude runs the conversation with no terminal attached.
+    pub background: bool,
+}
+
+impl ClaudeSessionRecord {
+    /// A record is usable once it names a pid.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let v = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let text = |key: &str| {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        Some(Self {
+            pid: v.get("pid").and_then(|x| x.as_u64())? as u32,
+            proc_start: text("procStart"),
+            session_id: text("sessionId"),
+            job_id: text("jobId"),
+            name: text("name"),
+            status: text("status").map(|s| SessionStatus::from_status_str(&s)),
+            background: v.get("kind").and_then(|x| x.as_str()) == Some("bg"),
+        })
+    }
+
+    /// Read the record a pid would have written.
+    pub fn read(pid: u32) -> Option<Self> {
+        Self::parse(&std::fs::read(claude_session_path(pid)?).ok()?)
+    }
+
+    /// Whether the process that wrote this record is still running. The pid
+    /// alone is not enough, because the kernel reuses pids; the recorded start
+    /// time settles it.
+    pub fn is_live(&self) -> bool {
+        match (self.proc_start.as_deref(), proc_start_of(self.pid)) {
+            (Some(recorded), Some(actual)) => recorded == actual,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Field 22 of `/proc/<pid>/stat`, the process start time in clock ticks. The
+/// comm field before it may hold spaces and parentheses, so the split is on
+/// its closing one.
+fn proc_start_of(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19).map(str::to_string)
+}
+
+/// Where claude keeps its session records.
+pub fn claude_sessions_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".claude")
+            .join("sessions"),
+    )
+}
+
+/// The record file a given pid writes.
+pub fn claude_session_path(pid: u32) -> Option<std::path::PathBuf> {
+    Some(claude_sessions_dir()?.join(format!("{pid}.json")))
+}
+
+/// Raw PTY history kept per session, in bytes. The daemon holds the
+/// authoritative ring and a client mirrors it, so both ends size it the same.
+pub const RING_BYTES_CAP: usize = 1_048_576;
+
+/// Lines of grid history a session's terminal keeps.
+pub const SCROLLBACK_LINES: usize = 4096;
+
+/// On-screen phrasings that mean claude is waiting on a permission answer.
+const PROMPT_NEEDLES: &[&str] = &[
+    "do you want to proceed",
+    "allow this",
+    "apply this edit",
+    "requires approval",
+    "don't ask again",
+    "esc to cancel",
+];
+
+/// Whether a session's visible text is asking the user for permission. Both
+/// the daemon's probe and the local-PTY path ask this of their own grid, so
+/// the phrasings and the numbered-choice fallback live here rather than in
+/// each of them.
+pub fn is_permission_prompt(screen: &str) -> bool {
+    let lower = screen.to_lowercase();
+    if PROMPT_NEEDLES.iter().any(|n| lower.contains(n)) {
+        return true;
+    }
+    lower.contains("1. yes") && (lower.contains("2. no") || lower.contains("3. no"))
+}
+
 pub const MAX_FRAME_BYTES: u32 = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -339,185 +468,5 @@ pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<T,
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn round_trip<T: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug>(msg: T) {
-        let mut buf: Vec<u8> = Vec::new();
-        write_frame(&mut buf, &msg).expect("write");
-        let mut cur = Cursor::new(&buf);
-        let back: T = read_frame(&mut cur).expect("read");
-        assert_eq!(format!("{:?}", msg), format!("{:?}", back));
-    }
-
-    #[test]
-    fn request_hello() {
-        round_trip(Request::Hello {
-            client_version: "0.1.0".into(),
-            want_protocol: PROTOCOL_VERSION,
-        });
-    }
-
-    #[test]
-    fn request_spawn_generic_command() {
-        round_trip(Request::SpawnSession {
-            cwd: PathBuf::from("/tmp"),
-            cmd: vec!["bash".into(), "-l".into()],
-            probe: ProbeKind::None,
-            label: Some("shell".into()),
-            rows: 40,
-            cols: 120,
-        });
-    }
-
-    #[test]
-    fn request_spawn_claude_probe() {
-        round_trip(Request::SpawnSession {
-            cwd: PathBuf::from("/tmp"),
-            cmd: claude_command(true, Some("abc")),
-            probe: ProbeKind::Claude {
-                dangerous: true,
-                resume_id: Some("abc".into()),
-            },
-            label: Some("dev".into()),
-            rows: 24,
-            cols: 80,
-        });
-    }
-
-    #[test]
-    fn request_input_bytes() {
-        round_trip(Request::Input {
-            session_id: 7,
-            bytes: vec![0x1b, b'[', b'A'],
-        });
-    }
-
-    #[test]
-    fn event_welcome() {
-        round_trip(Event::Welcome {
-            server_version: "0.1.0".into(),
-            protocol: PROTOCOL_VERSION,
-            session_count: 3,
-        });
-    }
-
-    #[test]
-    fn event_framedelta() {
-        round_trip(Event::FrameDelta {
-            id: 1,
-            bytes: vec![1, 2, 3, 4, 5],
-        });
-    }
-
-    #[test]
-    fn envelope_round_trip() {
-        round_trip(Envelope {
-            id: Some(42),
-            body: Request::ListSessions,
-        });
-    }
-
-    #[test]
-    fn truncated_frame_is_eof() {
-        let mut cur = Cursor::new(Vec::<u8>::new());
-        let err = read_frame::<_, Request>(&mut cur).unwrap_err();
-        assert!(matches!(err, FrameError::Eof));
-    }
-
-    #[test]
-    fn oversize_frame_rejected_on_read() {
-        let mut buf = Vec::new();
-        let huge_len = MAX_FRAME_BYTES + 1;
-        buf.extend_from_slice(&huge_len.to_le_bytes());
-        let mut cur = Cursor::new(buf);
-        let err = read_frame::<_, Request>(&mut cur).unwrap_err();
-        assert!(matches!(err, FrameError::TooLarge(_)));
-    }
-
-    #[test]
-    fn claude_command_matches_the_flags_it_is_given() {
-        assert_eq!(claude_command(false, None), vec!["claude"]);
-        assert_eq!(
-            claude_command(true, None),
-            vec!["claude", "--dangerously-skip-permissions"]
-        );
-        assert_eq!(
-            claude_command(false, Some("s1")),
-            vec!["claude", "--resume", "s1"]
-        );
-        assert_eq!(
-            claude_command(true, Some("s1")),
-            vec!["claude", "--dangerously-skip-permissions", "--resume", "s1"]
-        );
-    }
-
-    #[test]
-    fn probe_accessors_read_through_the_claude_variant() {
-        let claude = ProbeKind::Claude {
-            dangerous: true,
-            resume_id: Some("s1".into()),
-        };
-        assert!(claude.dangerous());
-        assert_eq!(claude.resume_id(), Some("s1"));
-
-        let tame = ProbeKind::Claude {
-            dangerous: false,
-            resume_id: None,
-        };
-        assert!(!tame.dangerous());
-        assert_eq!(tame.resume_id(), None);
-
-        assert!(!ProbeKind::None.dangerous());
-        assert_eq!(ProbeKind::None.resume_id(), None);
-    }
-
-    #[test]
-    fn session_status_parses_the_claude_json_field() {
-        assert_eq!(SessionStatus::from_status_str("busy"), SessionStatus::Busy);
-        assert_eq!(SessionStatus::from_status_str("idle"), SessionStatus::Idle);
-        assert_eq!(
-            SessionStatus::from_status_str("something-else"),
-            SessionStatus::Unknown
-        );
-    }
-
-    // terminal_spawn_env reads $TERM_PROGRAM, $TMUX, …, mutating the process
-    // env in tests would race with parallel tests in this crate. Instead the
-    // test asserts canonical-override behavior using whatever the host env
-    // happens to be: TERM/COLORTERM must always equal the cmux defaults, the
-    // strip list must never appear in the output regardless of what was set,
-    // and unrelated vars must pass through.
-    #[test]
-    fn terminal_spawn_env_overrides_term_and_strips_listed() {
-        let env: std::collections::HashMap<String, String> =
-            terminal_spawn_env().into_iter().collect();
-
-        // Canonical overrides — no matter what TERM/COLORTERM were set to in
-        // the host env, cmux forces these values.
-        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
-        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
-
-        // Strip list — these must never appear in the spawn env even if the
-        // host has them set. Pick a representative subset.
-        for name in &[
-            "TERM_PROGRAM",
-            "TMUX",
-            "WT_SESSION",
-            "ITERM_SESSION_ID",
-            "KITTY_WINDOW_ID",
-        ] {
-            assert!(
-                !env.contains_key(*name),
-                "{name} should be stripped from the spawn env"
-            );
-        }
-
-        // Pass-through smoke: PATH is essentially always set by any shell that
-        // ran cargo test, and PATH is not on the strip list.
-        if std::env::var("PATH").is_ok() {
-            assert!(env.contains_key("PATH"));
-        }
-    }
-}
+#[path = "tests/proto.rs"]
+mod tests;
