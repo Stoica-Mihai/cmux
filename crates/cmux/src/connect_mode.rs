@@ -24,8 +24,6 @@ use crate::client::Client;
 use crate::session::{DaemonSlot, PendingStatus};
 use crate::util::now_ms;
 
-const RING_CAP: usize = 1_048_576;
-
 /// Spawn `cmuxd` in the background and wait up to ~2 s for its socket to
 /// appear. Tries the binary next to the current `cmux` first, then `cmuxd`
 /// on `$PATH`.
@@ -96,19 +94,24 @@ impl SpawnMailbox {
         })
     }
     pub fn fulfill(&self, info: SessionInfo) {
-        let mut g = self.inner.lock().unwrap();
-        *g = Some(info);
-        self.cv.notify_all();
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(info);
+            self.cv.notify_all();
+        }
     }
+
+    /// The spawned session's info, or `None` on timeout. A poisoned lock also
+    /// reads as `None`: the caller reports the spawn as unanswered rather
+    /// than taking the whole TUI down with it.
     pub fn wait(&self, timeout_ms: u64) -> Option<SessionInfo> {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().ok()?;
         if g.is_some() {
             return g.take();
         }
         let (mut gg, _) = self
             .cv
             .wait_timeout(g, std::time::Duration::from_millis(timeout_ms))
-            .unwrap();
+            .ok()?;
         gg.take()
     }
 }
@@ -122,7 +125,17 @@ pub struct DaemonHandle {
 
 impl DaemonHandle {
     pub fn register_slot(&self, remote_id: u64, slot: DaemonSlot) {
-        self.slots.lock().unwrap().insert(remote_id, Arc::new(slot));
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.insert(remote_id, Arc::new(slot));
+        }
+    }
+
+    /// Drop a slot registered for a session this client never finished wiring
+    /// up, so no FrameDelta is routed to a session with no row.
+    pub fn forget_slot(&self, remote_id: u64) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.remove(&remote_id);
+        }
     }
 
     pub fn request(&self, req: Request) -> Result<()> {
@@ -189,7 +202,7 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
                             }
                             if let Ok(mut r) = slot.byte_ring.lock() {
                                 r.extend(bytes.iter().copied());
-                                let over = r.len().saturating_sub(RING_CAP);
+                                let over = r.len().saturating_sub(cmux_proto::RING_BYTES_CAP);
                                 if over > 0 {
                                     r.drain(..over);
                                 }
