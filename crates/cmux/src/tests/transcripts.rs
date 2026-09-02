@@ -173,7 +173,7 @@ fn slug_decode_restores_a_dash_free_path() {
 #[test]
 fn slug_decode_cannot_tell_a_dash_from_a_separator() {
     assert_eq!(
-        slug_decode(&Path::new("/any/projects/-home-u-my-project")),
+        slug_decode(Path::new("/any/projects/-home-u-my-project")),
         PathBuf::from("/home/u/my/project"),
         "the encoding is lossy, so a dashed path decodes to the wrong directory"
     );
