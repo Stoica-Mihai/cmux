@@ -371,6 +371,10 @@ pub struct App {
     pub needs_redraw: bool,
     pub persist_dirty: bool,
     pub last_tile_area: Option<Rect>,
+    /// Whether the focused session's name is scrolling in the sidebar, set by
+    /// the draw. The event loop redraws faster while it is, so the slide is
+    /// smooth without spending frames on a still sidebar.
+    pub marquee_active: bool,
     pub render_tick: u64,
     pub toast: Option<Toast>,
     pub daemon: Option<Arc<DaemonHandle>>,
@@ -400,6 +404,7 @@ impl App {
             needs_redraw: true,
             persist_dirty: false,
             last_tile_area: None,
+            marquee_active: false,
             render_tick: 0,
             toast: None,
             daemon: None,

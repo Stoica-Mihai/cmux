@@ -11,7 +11,7 @@ use crate::session::{Session, SessionStatus};
 use crate::term_render::TermWidget;
 use crate::theme;
 
-use super::widgets::{pad_right, selection_bg, titled_block, truncate, viewport_window};
+use super::widgets::{marquee, pad_right, selection_bg, titled_block, truncate, viewport_window};
 
 /// Sidebar width. Sized for a session's label and the tail of its cwd; the
 /// tile takes everything else.
@@ -33,9 +33,12 @@ pub(super) fn draw_dashboard(
         (None, area)
     };
 
-    if let Some(sidebar) = sidebar {
-        draw_sidebar(f, app, sidebar);
-    }
+    // The loop redraws faster while a name is scrolling, so it has to be told.
+    let scrolling = match sidebar {
+        Some(sidebar) => draw_sidebar(f, app, sidebar),
+        None => false,
+    };
+    app.marquee_active = scrolling;
 
     if app.sessions.is_empty() {
         let empty = Paragraph::new(vec![
@@ -67,7 +70,9 @@ pub(super) fn draw_dashboard(
     }
 }
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+/// Returns whether the focused session's name is too long for its column,
+/// and so is scrolling.
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) -> bool {
     let block = titled_block(" sessions ", theme::ACCENT_GREEN);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -81,7 +86,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             )),
         ]);
         f.render_widget(hint, inner);
-        return;
+        return false;
     }
 
     // One row per session. Three rows each spent most of their cells on
@@ -130,6 +135,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             note,
         );
     }
+
+    app.sessions
+        .get(app.focus)
+        .is_some_and(|s| s.label.chars().count() > layout.name_w)
 }
 
 /// Column widths one pass over the sidebar shares. The number column grows
@@ -226,10 +235,14 @@ fn draw_sidebar_row(
             Style::default().fg(theme::ACCENT_RED),
         ));
     }
-    spans.push(Span::styled(
-        pad_right(&truncate(&s.label, layout.name_w), layout.name_w),
-        name_style,
-    ));
+    // Only the focused row scrolls. Every overflowing name moving at once
+    // turns the sidebar into a wall of motion.
+    let name = if focused {
+        marquee(&s.label, layout.name_w, crate::util::now_ms())
+    } else {
+        truncate(&s.label, layout.name_w)
+    };
+    spans.push(Span::styled(pad_right(&name, layout.name_w), name_style));
     spans.push(Span::styled(
         format!(
             " {:>width$}",

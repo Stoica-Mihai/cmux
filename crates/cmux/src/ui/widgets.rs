@@ -173,6 +173,42 @@ pub(super) fn pad_right(s: &str, width: usize) -> String {
     out
 }
 
+/// How long the start of a scrolling name is held still before it slides, so
+/// the beginning stays readable on every pass.
+pub(super) const MARQUEE_HOLD_MS: u64 = 1_200;
+
+/// How long each column of the slide takes. The event loop beats at least this
+/// often while a name is scrolling.
+pub const MARQUEE_STEP_MS: u64 = 160;
+
+/// Sits between the end of a scrolling name and the start of it coming round
+/// again.
+const MARQUEE_GAP: &str = " \u{b7} ";
+
+/// The `width` characters of `name` to show at `now_ms`. A name that fits is
+/// returned unchanged. A longer one cycles: held at the start for
+/// [`MARQUEE_HOLD_MS`], then one column per [`MARQUEE_STEP_MS`] until it comes
+/// back round through the gap.
+///
+/// Driven by the wall clock rather than a frame counter, so the speed does not
+/// follow how fast a session happens to be producing output.
+pub(super) fn marquee(name: &str, width: usize, now_ms: u64) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if width == 0 || chars.len() <= width {
+        return name.to_string();
+    }
+    let cycle: Vec<char> = chars.into_iter().chain(MARQUEE_GAP.chars()).collect();
+    let span = cycle.len();
+    let pass_ms = MARQUEE_HOLD_MS + span as u64 * MARQUEE_STEP_MS;
+    let into = now_ms % pass_ms;
+    let offset = if into < MARQUEE_HOLD_MS {
+        0
+    } else {
+        (((into - MARQUEE_HOLD_MS) / MARQUEE_STEP_MS) as usize) % span
+    };
+    (0..width).map(|i| cycle[(offset + i) % span]).collect()
+}
+
 #[cfg(test)]
 #[path = "../tests/widgets.rs"]
 mod tests;

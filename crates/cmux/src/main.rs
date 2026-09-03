@@ -161,8 +161,13 @@ fn drive(
             app.toast = None;
             app.needs_redraw = true;
         }
-        if app.needs_redraw || any_session_dirty || now.saturating_sub(last_draw_ms) >= HEARTBEAT_MS
-        {
+        // A scrolling name needs a frame per column; a still sidebar does not.
+        let beat = if app.marquee_active {
+            ui::MARQUEE_STEP_MS
+        } else {
+            HEARTBEAT_MS
+        };
+        if app.needs_redraw || any_session_dirty || now.saturating_sub(last_draw_ms) >= beat {
             project_selection(app);
             app.render_tick = app.render_tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, app, tile_sizes))?;

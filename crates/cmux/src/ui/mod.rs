@@ -17,6 +17,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Mode};
 
+pub use widgets::MARQUEE_STEP_MS;
+
 pub type TileSizes = Vec<(usize, u16, u16)>;
 
 pub fn draw(f: &mut Frame, app: &mut App, tile_sizes: &mut TileSizes) {
