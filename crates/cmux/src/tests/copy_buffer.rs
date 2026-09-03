@@ -317,3 +317,152 @@ fn a_range_over_blank_rows_is_empty() {
     let b = CopyBuffer::new(blank, (3, 20));
     assert_eq!(b.text_range((0, 0), (2, 19)).trim(), "");
 }
+
+// ---------------------------------------------------------------------------
+// Word and line units, as a double or triple click selects them
+// ---------------------------------------------------------------------------
+
+fn buf_of(lines: &[(&str, bool)]) -> CopyBuffer {
+    let rows: Vec<Row> = lines.iter().map(|(t, w)| Row::new(*t, *w)).collect();
+    let cols = rows
+        .iter()
+        .map(|r| r.text.chars().count())
+        .max()
+        .unwrap_or(0);
+    CopyBuffer::new(rows, (lines.len() as u16, cols as u16))
+}
+
+#[test]
+fn a_word_is_bounded_by_what_surrounds_it() {
+    let b = buf_of(&[("the quick brown fox", false)]);
+    // "quick" occupies columns 4 through 8.
+    assert_eq!(b.word_bounds(0, 4), (4, 8));
+    assert_eq!(b.word_bounds(0, 6), (4, 8), "the middle of the word");
+    assert_eq!(b.word_bounds(0, 8), (4, 8), "its last cell");
+    assert_eq!(b.word_bounds(0, 0), (0, 2), "the first word");
+    assert_eq!(b.word_bounds(0, 16), (16, 18), "the last word");
+}
+
+/// A path is one word. It is the thing most worth grabbing in one press, and
+/// stopping at every dot and slash would make a double click useless for it.
+#[test]
+fn a_path_or_identifier_selects_whole() {
+    for (text, want) in [
+        ("edit crates/cmux/src/main.rs now", (5usize, 27usize)),
+        ("see ~/notes.txt here", (4, 14)),
+        ("run user@host:/tmp ok", (4, 17)),
+        ("version 1.2.3-rc1 out", (8, 16)),
+    ] {
+        let b = buf_of(&[(text, false)]);
+        let mid = ((want.0 + want.1) / 2) as u16;
+        assert_eq!(
+            b.word_bounds(0, mid),
+            (want.0 as u16, want.1 as u16),
+            "{text:?} at column {mid}"
+        );
+    }
+}
+
+#[test]
+fn a_press_on_spaces_takes_the_stretch_of_spaces() {
+    let b = buf_of(&[("a    b", false)]);
+    assert_eq!(b.word_bounds(0, 2), (1, 4));
+}
+
+#[test]
+fn a_run_of_punctuation_is_its_own_unit() {
+    let b = buf_of(&[("foo >>> bar", false)]);
+    assert_eq!(b.word_bounds(0, 5), (4, 6));
+}
+
+#[test]
+fn a_word_on_an_empty_row_is_the_cell_itself() {
+    let b = buf_of(&[("", false)]);
+    assert_eq!(b.word_bounds(0, 7), (7, 7));
+    assert_eq!(
+        b.word_bounds(99, 3),
+        (3, 3),
+        "and off the end of the buffer"
+    );
+}
+
+/// A line the terminal broke over several rows is one line, because that is
+/// what it was before the width forced it apart.
+#[test]
+fn a_line_follows_the_wraps_the_terminal_made() {
+    let b = buf_of(&[
+        ("first", false),
+        ("carries on ", true),
+        ("across the ", true),
+        ("wrap", false),
+        ("last", false),
+    ]);
+    let want = ((1usize, 0u16), (3usize, 3u16));
+    for line in 1..=3 {
+        assert_eq!(b.line_bounds(line), want, "from row {line}");
+    }
+    assert_eq!(b.line_bounds(0), ((0, 0), (0, 4)), "an unwrapped row alone");
+    assert_eq!(b.line_bounds(4), ((4, 0), (4, 3)));
+}
+
+#[test]
+fn snapping_a_char_selection_changes_nothing() {
+    let b = buf_of(&[("the quick brown fox", false)]);
+    let (lo, hi) = b.snap((0, 6), (0, 12), Granularity::Char);
+    assert_eq!((lo, hi), ((0, 6), (0, 12)));
+}
+
+/// The whole point: a drag that starts mid-word and ends mid-word covers both
+/// words whole, and grows a word at a time rather than a cell at a time.
+#[test]
+fn a_word_drag_covers_both_ends_whole() {
+    let b = buf_of(&[("the quick brown fox", false)]);
+    let (lo, hi) = b.snap((0, 6), (0, 12), Granularity::Word);
+    assert_eq!(b.text_range(lo, hi), "quick brown");
+
+    // Dragging one cell further still lands on the same word.
+    let (lo, hi) = b.snap((0, 6), (0, 13), Granularity::Word);
+    assert_eq!(b.text_range(lo, hi), "quick brown");
+
+    // One cell further again reaches the next word, and takes all of it.
+    let (lo, hi) = b.snap((0, 6), (0, 16), Granularity::Word);
+    assert_eq!(b.text_range(lo, hi), "quick brown fox");
+}
+
+#[test]
+fn a_word_press_with_no_drag_selects_that_word() {
+    let b = buf_of(&[("the quick brown fox", false)]);
+    let (lo, hi) = b.snap((0, 6), (0, 6), Granularity::Word);
+    assert_eq!(b.text_range(lo, hi), "quick");
+}
+
+#[test]
+fn a_line_press_with_no_drag_selects_the_whole_line() {
+    let b = buf_of(&[("first line", false), ("second line", false)]);
+    let (lo, hi) = b.snap((1, 4), (1, 4), Granularity::Line);
+    assert_eq!(b.text_range(lo, hi), "second line");
+}
+
+#[test]
+fn a_line_drag_covers_every_line_it_touches_whole() {
+    let b = buf_of(&[
+        ("first line", false),
+        ("second line", false),
+        ("third line", false),
+    ]);
+    let (lo, hi) = b.snap((0, 6), (2, 2), Granularity::Line);
+    assert_eq!(b.text_range(lo, hi), "first line\nsecond line\nthird line");
+}
+
+/// Dragging backwards selects the same text as dragging forwards.
+#[test]
+fn snapping_normalises_a_backwards_drag() {
+    let b = buf_of(&[("the quick brown fox", false)]);
+    for gran in [Granularity::Char, Granularity::Word, Granularity::Line] {
+        assert_eq!(
+            b.snap((0, 12), (0, 6), gran),
+            b.snap((0, 6), (0, 12), gran),
+            "{gran:?}"
+        );
+    }
+}

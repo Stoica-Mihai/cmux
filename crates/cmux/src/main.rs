@@ -313,16 +313,12 @@ fn project_selection(app: &mut App) {
     let (Some(buf), Some(drag)) = (&s.copy, &s.drag) else {
         return;
     };
-    if drag.anchor == drag.tip {
+    if drag.anchor == drag.tip && drag.gran == copy_buffer::Granularity::Char {
         s.selection = None;
         return;
     }
     let rows = s.size.0;
-    let (lo, hi) = if drag.anchor <= drag.tip {
-        (drag.anchor, drag.tip)
-    } else {
-        (drag.tip, drag.anchor)
-    };
+    let (lo, hi) = buf.snap(drag.anchor, drag.tip, drag.gran);
     // A line scrolled off the top selects from the first visible row, and one
     // past the bottom to the last: the part on screen is highlighted, and the
     // rest is still in the buffer for the copy.
@@ -736,6 +732,10 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
     }
 }
 
+/// How long after a press another one on the same cell still counts as part of
+/// the same multi-click.
+const MULTI_CLICK_MS: u64 = 400;
+
 fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, inside: bool) {
     let Some(s) = app.sessions.get_mut(app.focus) else {
         return;
@@ -747,6 +747,22 @@ fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, insid
     s.stitch = None;
     s.drag_edge = None;
     s.mouse_down_at = inside.then(|| (me.row - tile.y, me.column - tile.x));
+
+    // The terminal sends a press with no click count, so presses running
+    // together on one cell are what a double or triple click is made of. The
+    // count cycles, as it does in a terminal: a fourth press is a cell again.
+    let now = util::now_ms();
+    let together = now.saturating_sub(s.last_click_ms) <= MULTI_CLICK_MS
+        && s.last_click_cell == s.mouse_down_at
+        && s.mouse_down_at.is_some();
+    s.click_count = if together { s.click_count % 3 + 1 } else { 1 };
+    s.last_click_ms = now;
+    s.last_click_cell = s.mouse_down_at;
+    let gran = match s.click_count {
+        2 => copy_buffer::Granularity::Word,
+        3 => copy_buffer::Granularity::Line,
+        _ => copy_buffer::Granularity::Char,
+    };
 
     // Start collecting from what is on screen. A drag that never reaches an
     // edge only ever reads this one screen; one that does gets the rows the
@@ -766,6 +782,7 @@ fn mouse_press(app: &mut App, me: MouseEvent, tile: ratatui::layout::Rect, insid
             s.drag = Some(session::DragRange {
                 anchor: (line, col),
                 tip: (line, col),
+                gran,
             });
             s.copy = Some(buf);
         }
@@ -918,7 +935,12 @@ fn mouse_release(app: &mut App) {
     // The buffer is the authority: it holds everything the drag scrolled
     // through, not just the screen that happens to be up.
     let text = match (&s.copy, &s.drag) {
-        (Some(buf), Some(drag)) if drag.anchor != drag.tip => buf.text_range(drag.anchor, drag.tip),
+        (Some(buf), Some(drag))
+            if drag.anchor != drag.tip || drag.gran != copy_buffer::Granularity::Char =>
+        {
+            let (lo, hi) = buf.snap(drag.anchor, drag.tip, drag.gran);
+            buf.text_range(lo, hi)
+        }
         _ => return,
     };
     if text.trim().is_empty() {

@@ -44,6 +44,9 @@ pub struct StitchWait {
 pub struct DragRange {
     pub anchor: (usize, u16),
     pub tip: (usize, u16),
+    /// How much one step of the drag covers, fixed by the press that started
+    /// it: a cell for one click, a word for two, a line for three.
+    pub gran: crate::copy_buffer::Granularity,
 }
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
@@ -224,6 +227,13 @@ pub struct Session {
     pub manually_renamed: bool,
     pub selection: Option<TileSelection>,
     pub mouse_down_at: Option<(u16, u16)>,
+    /// When and where the last press landed, and how many presses have run
+    /// together there. The terminal reports no click count of its own, so
+    /// consecutive presses on one cell are what makes a double or triple
+    /// click.
+    pub last_click_ms: u64,
+    pub last_click_cell: Option<(u16, u16)>,
+    pub click_count: u8,
     /// Output collected across scrolls while a selection is being dragged, so
     /// the selection can span more than the one screen the grid holds.
     pub copy: Option<crate::copy_buffer::CopyBuffer>,
@@ -341,6 +351,9 @@ impl Session {
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
+            last_click_ms: 0,
+            last_click_cell: None,
+            click_count: 0,
             copy: None,
             drag: None,
             stitch: None,
@@ -423,6 +436,9 @@ impl Session {
             manually_renamed: false,
             selection: None,
             mouse_down_at: None,
+            last_click_ms: 0,
+            last_click_cell: None,
+            click_count: 0,
             copy: None,
             drag: None,
             stitch: None,

@@ -12,6 +12,36 @@
 //! from that overlap rather than assumed. A program free to scroll 2 rows one
 //! time and 3 the next stays handled, and so does one that changes its step.
 
+/// How much of the text one press selects: a cell, the word under it, or the
+/// whole line. A terminal picks this from the number of clicks, and it holds
+/// for the drag that follows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Granularity {
+    #[default]
+    Char,
+    Word,
+    Line,
+}
+
+/// Characters a word-granularity selection keeps together. Beyond
+/// alphanumerics this is what a path, an identifier or a version is made of,
+/// so one press takes the whole thing rather than stopping at every dot.
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '~' | '+')
+}
+
+/// Which run a character belongs to. Runs of the same class select together,
+/// so a word, a stretch of spaces and a run of punctuation are each one unit.
+fn class(c: char) -> u8 {
+    if is_word(c) {
+        0
+    } else if c.is_whitespace() {
+        1
+    } else {
+        2
+    }
+}
+
 /// One captured row: its text, and whether the terminal wrapped it into the
 /// row below.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +302,80 @@ impl CopyBuffer {
         term: &alacritty_terminal::Term<alacritty_terminal::event::VoidListener>,
     ) -> Option<usize> {
         self.stitch(rows_of(term))
+    }
+
+    /// Columns of the run at `col` on `line`, inclusive. A press on a space
+    /// takes the stretch of spaces and one on punctuation takes that run, as a
+    /// terminal does.
+    pub fn word_bounds(&self, line: usize, col: u16) -> (u16, u16) {
+        let Some(row) = self.rows.get(line) else {
+            return (col, col);
+        };
+        let chars: Vec<char> = row.text.chars().collect();
+        if chars.is_empty() {
+            return (col, col);
+        }
+        let at = (col as usize).min(chars.len() - 1);
+        let want = class(chars[at]);
+        let mut lo = at;
+        while lo > 0 && class(chars[lo - 1]) == want {
+            lo -= 1;
+        }
+        let mut hi = at;
+        while hi + 1 < chars.len() && class(chars[hi + 1]) == want {
+            hi += 1;
+        }
+        (lo as u16, hi as u16)
+    }
+
+    /// First and last cell of the logical line `line` sits in, following the
+    /// wraps the terminal made. A line the terminal broke over three rows is
+    /// one unit, because that is what it was before the width forced it.
+    pub fn line_bounds(&self, line: usize) -> ((usize, u16), (usize, u16)) {
+        let last = self.rows.len().saturating_sub(1);
+        let line = line.min(last);
+        let mut start = line;
+        while start > 0 && self.rows[start - 1].wrapped {
+            start -= 1;
+        }
+        let mut end = line;
+        while end < last && self.rows[end].wrapped {
+            end += 1;
+        }
+        let end_col = self.rows[end]
+            .text
+            .chars()
+            .count()
+            .saturating_sub(1)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        ((start, 0), (end, end_col))
+    }
+
+    /// The two endpoints a selection covers at `gran`, ordered. The first is
+    /// pulled back to the start of its unit and the second pushed out to the
+    /// end of its own, so a drag grows a unit at a time rather than a cell at
+    /// a time.
+    pub fn snap(
+        &self,
+        a: (usize, u16),
+        b: (usize, u16),
+        gran: Granularity,
+    ) -> ((usize, u16), (usize, u16)) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        match gran {
+            Granularity::Char => (lo, hi),
+            Granularity::Word => {
+                let (start, _) = self.word_bounds(lo.0, lo.1);
+                let (_, end) = self.word_bounds(hi.0, hi.1);
+                ((lo.0, start), (hi.0, end))
+            }
+            Granularity::Line => {
+                let (start, _) = self.line_bounds(lo.0);
+                let (_, end) = self.line_bounds(hi.0);
+                (start, end)
+            }
+        }
     }
 
     /// The text between two points, as a flowing selection: the first line
