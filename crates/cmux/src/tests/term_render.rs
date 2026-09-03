@@ -56,7 +56,8 @@ const LINK: &[u8] = b"see \x1b]8;;https://example.com/a\x1b\\HERE\x1b]8;;\x1b\\ 
 fn painted(rows: usize, cols: usize, bytes: &[u8], area: Rect) -> String {
     let term = build(rows, cols, bytes);
     let mut out: Vec<u8> = Vec::new();
-    emit_hyperlinks(&term, area, &mut out).expect("write");
+    let files = crate::file_links::FileLinks::default();
+    emit_hyperlinks(&term, area, &files, &mut out).expect("write");
     String::from_utf8(out).expect("utf8")
 }
 

@@ -360,6 +360,9 @@ pub struct App {
     pub mode: Mode,
     pub next_id: u64,
     pub default_cwd: PathBuf,
+    /// Path tokens already resolved against the filesystem, so the link pass
+    /// does not re-check the same screen every frame.
+    pub file_links: crate::file_links::Cache,
     pub term_size: (u16, u16),
     pub should_quit: bool,
     pub status: String,
@@ -388,6 +391,7 @@ impl App {
             mode: Mode::Dashboard,
             next_id: 1,
             default_cwd,
+            file_links: crate::file_links::Cache::default(),
             term_size,
             should_quit: false,
             status: String::new(),

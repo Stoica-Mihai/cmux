@@ -45,7 +45,7 @@ pub fn debug_enabled() -> bool {
     std::env::var_os("CMUX_DEBUG").is_some()
 }
 
-fn home() -> Option<PathBuf> {
+pub(crate) fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 

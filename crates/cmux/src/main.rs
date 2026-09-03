@@ -3,6 +3,7 @@ mod claude_sessions;
 mod client;
 mod connect_mode;
 mod copy_buffer;
+mod file_links;
 mod keys;
 mod persist;
 mod session;
@@ -170,7 +171,7 @@ fn drive(
                     let _ = s.resize(rows.max(2), cols.max(4));
                 }
             }
-            paint_hyperlinks(app);
+            paint_hyperlinks(app, now);
             app.needs_redraw = false;
             last_draw_ms = now;
         }
@@ -345,7 +346,9 @@ fn project_selection(app: &mut App) {
 /// Wrap the focused tile's OSC 8 links onto the frame just drawn. ratatui
 /// cannot carry a hyperlink through its buffer, so the links are painted over
 /// the cells it already placed. A popup covering the tile skips the pass.
-fn paint_hyperlinks(app: &App) {
+/// Overdraw the focused tile's links: the ones the program printed as OSC 8,
+/// and the `file://` targets cmux synthesises for the file paths on screen.
+fn paint_hyperlinks(app: &mut App, now_ms: u64) {
     use std::io::Write;
     let covered = matches!(
         app.mode,
@@ -357,11 +360,19 @@ fn paint_hyperlinks(app: &App) {
     let (Some(area), Some(session)) = (app.last_tile_area, app.sessions.get(app.focus)) else {
         return;
     };
+    let cache = &mut app.file_links;
+    let cwd = session.cwd.clone();
     let mut buf: Vec<u8> = Vec::new();
     let painted = match &session.scrollback {
-        Some(sb) => term_render::emit_hyperlinks(&sb.term, area, &mut buf),
+        Some(sb) => {
+            let files = file_links::detect(&cmux_term::grid_rows(&sb.term), &cwd, cache, now_ms);
+            term_render::emit_hyperlinks(&sb.term, area, &files, &mut buf)
+        }
         None => match session.parser.lock() {
-            Ok(p) => term_render::emit_hyperlinks(&p.term, area, &mut buf),
+            Ok(p) => {
+                let files = file_links::detect(&cmux_term::grid_rows(&p.term), &cwd, cache, now_ms);
+                term_render::emit_hyperlinks(&p.term, area, &files, &mut buf)
+            }
             Err(_) => return,
         },
     };

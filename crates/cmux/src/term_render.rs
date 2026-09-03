@@ -326,9 +326,13 @@ mod tests;
 ///
 /// Cells sharing a hyperlink id and sitting next to each other are emitted as
 /// one run, opened and closed within a single write.
+///
+/// `files` carries the targets cmux synthesised for the file paths on screen.
+/// A link the program printed itself wins over a synthesised one.
 pub fn emit_hyperlinks<W: std::io::Write>(
     term: &Term<VoidListener>,
     area: Rect,
+    files: &crate::file_links::FileLinks,
     out: &mut W,
 ) -> std::io::Result<()> {
     let content = term.renderable_content();
@@ -350,11 +354,16 @@ pub fn emit_hyperlinks<W: std::io::Write>(
             && (col as usize) < area.width as usize;
 
         let link = if inside && !is_continuation(cell) {
-            cell.hyperlink()
+            match cell.hyperlink() {
+                Some(h) => Some((h.id().to_string(), h.uri().to_string())),
+                None => files
+                    .get(row as u16, col as u16)
+                    .map(|(id, uri)| (id, uri.to_string())),
+            }
         } else {
             None
         };
-        let Some(link) = link else {
+        let Some((id, uri)) = link else {
             if let Some(r) = run.take() {
                 r.write(out)?;
             }
@@ -368,12 +377,12 @@ pub fn emit_hyperlinks<W: std::io::Write>(
         let bg = to_cell_color(convert_color(cell.bg, &palette_table));
 
         match run.as_mut() {
-            Some(r) if r.extends(&link, x, y) => r.push(ch, fg, bg, cell.flags),
+            Some(r) if r.extends(&id, &uri, x, y) => r.push(ch, fg, bg, cell.flags),
             _ => {
                 if let Some(r) = run.take() {
                     r.write(out)?;
                 }
-                let mut r = Run::new(&link, x, y);
+                let mut r = Run::new(&id, &uri, x, y);
                 r.push(ch, fg, bg, cell.flags);
                 run = Some(r);
             }
@@ -396,10 +405,10 @@ struct Run {
 }
 
 impl Run {
-    fn new(link: &alacritty_terminal::term::cell::Hyperlink, x: u16, y: u16) -> Self {
+    fn new(id: &str, uri: &str, x: u16, y: u16) -> Self {
         Self {
-            id: link.id().to_string(),
-            uri: link.uri().to_string(),
+            id: id.to_string(),
+            uri: uri.to_string(),
             x,
             y,
             cells: Vec::new(),
@@ -408,9 +417,9 @@ impl Run {
 
     /// The next cell continues this run when it carries the same link and sits
     /// immediately to the right.
-    fn extends(&self, link: &alacritty_terminal::term::cell::Hyperlink, x: u16, y: u16) -> bool {
-        self.id == link.id()
-            && self.uri == link.uri()
+    fn extends(&self, id: &str, uri: &str, x: u16, y: u16) -> bool {
+        self.id == id
+            && self.uri == uri
             && y == self.y
             && x as usize == self.x as usize + self.cells.len()
     }
