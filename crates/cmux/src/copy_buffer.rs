@@ -30,6 +30,16 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '~' | '+')
 }
 
+/// Whether a row is one character drawn across the tile - a separator rule
+/// rather than text.
+fn is_rule(text: &str) -> bool {
+    let mut chars = text.trim().chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    !first.is_alphanumeric() && chars.clone().count() > 0 && chars.all(|c| c == first)
+}
+
 /// Which run a character belongs to. Runs of the same class select together,
 /// so a word, a stretch of spaces and a run of punctuation are each one unit.
 fn class(c: char) -> u8 {
@@ -40,6 +50,20 @@ fn class(c: char) -> u8 {
     } else {
         2
     }
+}
+
+/// How one row carries into the next when a selection spans both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Join {
+    /// A line of its own: the rows are separated by a newline.
+    Break,
+    /// The terminal ran out of columns mid-text. The rows are one line and
+    /// concatenate exactly, because the break can fall inside a word.
+    Wrap,
+    /// The program broke its own line to fit the width. The rows are one line
+    /// with a single space between them, because the break fell between
+    /// words, and the indent the program adds to the continuation goes.
+    Reflow,
 }
 
 /// One captured row: its text, and whether the terminal wrapped it into the
@@ -304,6 +328,57 @@ impl CopyBuffer {
         self.stitch(rows_of(term))
     }
 
+    /// Whether the next row continues this one, and how.
+    ///
+    /// The terminal's own wrap flag is authoritative when it is set. It is not
+    /// set for a program that wraps its own text - claude emits each visual
+    /// line separately, so the terminal never runs out of columns - and for
+    /// those the wrap has to be recognised from the shape of the two rows.
+    ///
+    /// The test is the wrapping decision itself: if the next row's first word
+    /// could not have fitted in the columns this row left free, then this row
+    /// was broken to make it fit rather than ended on purpose. A line that
+    /// stops with room to spare for the word that follows was a line the
+    /// program chose to end.
+    fn join_after(&self, line: usize) -> Join {
+        let Some(row) = self.rows.get(line) else {
+            return Join::Break;
+        };
+        if row.wrapped {
+            return Join::Wrap;
+        }
+        let Some(next) = self.rows.get(line + 1) else {
+            return Join::Break;
+        };
+        let trimmed = row.text.trim_end_matches(' ');
+        let filled = trimmed.chars().count();
+        // A blank row on either side ends the line: that is a paragraph break.
+        let cols = self.size.1 as usize;
+        if filled == 0 || next.text.trim().is_empty() || cols == 0 {
+            return Join::Break;
+        }
+        // A rule drawn across the tile is decoration, not prose. On this row it
+        // leaves no free columns and would swallow what follows; on the next
+        // it is wide enough that no line could have held it, and would be
+        // pulled up into the line above.
+        if is_rule(trimmed) || is_rule(next.text.trim_end_matches(' ')) {
+            return Join::Break;
+        }
+        let first_word = next
+            .text
+            .trim_start()
+            .split(' ')
+            .next()
+            .map(|w| w.chars().count())
+            .unwrap_or(0);
+        let free = cols.saturating_sub(filled);
+        if first_word + 1 > free {
+            Join::Reflow
+        } else {
+            Join::Break
+        }
+    }
+
     /// Columns of the run at `col` on `line`, inclusive. A press on a space
     /// takes the stretch of spaces and one on punctuation takes that run, as a
     /// terminal does.
@@ -384,6 +459,7 @@ impl CopyBuffer {
         let (start, end) = if from <= to { (from, to) } else { (to, from) };
         let last = end.0.min(self.rows.len().saturating_sub(1));
         let mut out = String::new();
+        let mut reflowed_into = false;
         for line in start.0.min(last)..=last {
             let row = &self.rows[line];
             let chars: Vec<char> = row.text.chars().collect();
@@ -398,12 +474,30 @@ impl CopyBuffer {
                 chars.len()
             };
             let piece: String = chars[lo.min(hi)..hi].iter().collect();
-            if row.wrapped && line < last {
-                out.push_str(&piece);
+            // Carrying on from a reflowed row: the indent the program puts on
+            // a continuation is layout, not text.
+            let piece = if reflowed_into {
+                piece.trim_start_matches(' ')
             } else {
-                out.push_str(piece.trim_end_matches(' '));
-                if line < last {
-                    out.push('\n');
+                piece.as_str()
+            };
+            let join = if line < last {
+                self.join_after(line)
+            } else {
+                Join::Break
+            };
+            reflowed_into = join == Join::Reflow;
+            match join {
+                Join::Wrap => out.push_str(piece),
+                Join::Reflow => {
+                    out.push_str(piece.trim_end_matches(' '));
+                    out.push(' ');
+                }
+                Join::Break => {
+                    out.push_str(piece.trim_end_matches(' '));
+                    if line < last {
+                        out.push('\n');
+                    }
                 }
             }
         }

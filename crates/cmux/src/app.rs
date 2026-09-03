@@ -499,9 +499,20 @@ impl App {
             // failure here used to return with the daemon holding a spawned
             // session and this client holding a slot for it, but no row in
             // the sidebar to reach either from.
-            if let Err(e) = daemon.request(cmux_proto::Request::Subscribe {
-                session_id: info.id,
-            }) {
+            if let Err(e) = daemon
+                .request(cmux_proto::Request::Subscribe {
+                    session_id: info.id,
+                })
+                .and_then(|()| {
+                    // Same as on adopt: the daemon has to be told this client's
+                    // size, or it does not count towards the pty's.
+                    daemon.request(cmux_proto::Request::Resize {
+                        session_id: info.id,
+                        rows,
+                        cols,
+                    })
+                })
+            {
                 daemon.forget_slot(info.id);
                 return Err(e);
             }
@@ -543,9 +554,22 @@ impl App {
             info.last_active_ms,
         );
         daemon.register_slot(info.id, slot);
+        // Register this client's size explicitly. The pty runs at the smallest
+        // size among attached clients, and `Session::resize` sends nothing
+        // when the size already matches what this client believes - which it
+        // does on connect. Without this the daemon never learns the client is
+        // there, so the pty keeps whatever width it was spawned at and the
+        // client renders a grid the child never laid its output out for.
         let wired = daemon
             .request(cmux_proto::Request::Subscribe {
                 session_id: info.id,
+            })
+            .and_then(|()| {
+                daemon.request(cmux_proto::Request::Resize {
+                    session_id: info.id,
+                    rows,
+                    cols,
+                })
             })
             .and_then(|()| {
                 daemon.request(cmux_proto::Request::Attach {

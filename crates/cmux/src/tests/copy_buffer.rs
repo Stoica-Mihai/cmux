@@ -324,11 +324,13 @@ fn a_range_over_blank_rows_is_empty() {
 
 fn buf_of(lines: &[(&str, bool)]) -> CopyBuffer {
     let rows: Vec<Row> = lines.iter().map(|(t, w)| Row::new(*t, *w)).collect();
+    // Wider than anything in it, so no row reads as one the width broke.
     let cols = rows
         .iter()
         .map(|r| r.text.chars().count())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 30;
     CopyBuffer::new(rows, (lines.len() as u16, cols as u16))
 }
 
@@ -465,4 +467,195 @@ fn snapping_normalises_a_backwards_drag() {
             "{gran:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lines the program wrapped itself
+// ---------------------------------------------------------------------------
+
+/// claude's real geometry: a 92-column tile, prose indented two columns and
+/// word-wrapped by the program, with each visual line emitted separately so
+/// the terminal never sets a wrap flag. Generating the rows by wrapping means
+/// the widths are the ones claude actually produces.
+fn program_wrapped(paragraphs: &[&str]) -> CopyBuffer {
+    const COLS: usize = 92;
+    const WRAP_AT: usize = 92;
+    let mut lines: Vec<String> = Vec::new();
+    for (i, para) in paragraphs.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+        }
+        if para.is_empty() {
+            continue;
+        }
+        let mut cur = String::from("  ");
+        for word in para.split_whitespace() {
+            let would = cur.chars().count() + 1 + word.chars().count();
+            if cur.trim().is_empty() {
+                cur.push_str(word);
+            } else if would > WRAP_AT {
+                lines.push(cur.clone());
+                cur = format!("  {word}");
+            } else {
+                cur.push(' ');
+                cur.push_str(word);
+            }
+        }
+        lines.push(cur);
+    }
+    let rows: Vec<Row> = lines
+        .iter()
+        .map(|l| Row::new(format!("{l:<width$}", width = COLS), false))
+        .collect();
+    let height = rows.len().try_into().unwrap_or(u16::MAX);
+    CopyBuffer::new(rows, (height, COLS as u16))
+}
+
+const PARA_ONE: &str = "Terminals wrap long lines because a terminal is a fixed grid of \
+    character cells, and the text it receives has no idea how wide that grid is. A program \
+    writes a stream of bytes with no line breaks until it decides to write one, so a line \
+    of three hundred characters arrives at a window eighty columns wide as one logical line.";
+
+const PARA_TWO: &str = "The behaviour also fits how terminals are used. Most output is meant \
+    to be read as it appears, from top to bottom, and wrapping keeps everything on screen \
+    without asking the reader to pan across a virtual page.";
+
+/// The bug this fixes. claude wraps its own prose, so no row carries the
+/// terminal's wrap flag, and every one of its wrap points became a hard
+/// newline in the copy. Pasted somewhere a newline is a line break, the text
+/// arrived broken mid-sentence with the rest of each line left empty.
+#[test]
+fn a_paragraph_the_program_wrapped_copies_as_one_line() {
+    let b = program_wrapped(&[PARA_ONE]);
+    assert!(b.len() > 3, "the paragraph should span several rows");
+    let text = b.text_range((0, 0), (b.len(), 91));
+    assert_eq!(text.lines().count(), 1, "still broken up: {text:?}");
+    assert_eq!(
+        text,
+        format!(
+            "  {}",
+            PARA_ONE.split_whitespace().collect::<Vec<_>>().join(" ")
+        ),
+        "the join lost a word, doubled a space, or kept a continuation's indent"
+    );
+}
+
+#[test]
+fn a_blank_row_keeps_two_paragraphs_apart() {
+    let b = program_wrapped(&[PARA_ONE, PARA_TWO]);
+    let text = b.text_range((0, 0), (b.len(), 91));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert_eq!(lines[1], "", "the blank line between them went missing");
+    assert!(lines[0].starts_with("  Terminals wrap"), "{:?}", lines[0]);
+    assert!(
+        lines[2].starts_with("  The behaviour also fits"),
+        "{:?}",
+        lines[2]
+    );
+}
+
+/// The test is the wrapping decision itself: a line that stopped with room to
+/// spare for the word that follows was ended on purpose, so it stays a line.
+#[test]
+fn a_line_that_ended_early_stays_its_own_line() {
+    let b = program_wrapped(&["This line stops well before the edge."]);
+    let more = program_wrapped(&["So does this one, on its own."]);
+    let mut rows: Vec<Row> = b.rows().to_vec();
+    rows.extend(more.rows().iter().cloned());
+    let joined = CopyBuffer::new(rows, (2, 92));
+    let text = joined.text_range((0, 0), (1, 91));
+    assert_eq!(text.lines().count(), 2, "wrongly joined: {text:?}");
+}
+
+/// One space either side of the boundary decides it, so the rule is worth
+/// pinning at the edge.
+#[test]
+fn the_boundary_is_whether_the_next_word_would_have_fitted() {
+    // 86 of 92 columns used, so six are free. Trailing spaces are not
+    // content, so the fill has to be real text.
+    let head = format!("  {}abcd", "word ".repeat(16));
+    assert_eq!(head.chars().count(), 86, "{head:?}");
+
+    for (next, want, why) in [
+        (
+            "  sevench and the rest",
+            1,
+            "seven letters plus a space needed seven of the six free",
+        ),
+        (
+            "  ab and the rest",
+            2,
+            "two letters would have fitted in the six free",
+        ),
+    ] {
+        let rows = vec![
+            Row::new(format!("{head:<92}"), false),
+            Row::new(format!("{next:<92}"), false),
+        ];
+        let b = CopyBuffer::new(rows, (2, 92));
+        let text = b.text_range((0, 0), (1, 91));
+        assert_eq!(text.lines().count(), want, "{why}: {text:?}");
+    }
+}
+
+/// A rule drawn across the tile leaves no free columns, so it would otherwise
+/// swallow whatever came after it.
+#[test]
+fn a_rule_does_not_swallow_the_next_line() {
+    for rule in ["\u{2500}".repeat(92), "-".repeat(92), "=".repeat(92)] {
+        let rows = vec![
+            Row::new(rule.clone(), false),
+            Row::new(format!("{:<92}", "  status line after the rule"), false),
+        ];
+        let b = CopyBuffer::new(rows, (2, 92));
+        let text = b.text_range((0, 0), (1, 91));
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+    }
+}
+
+/// And it must not be pulled up into the line above: it is wider than any
+/// line could hold, so it always reads as a word that would not have fitted.
+#[test]
+fn a_rule_is_not_pulled_up_into_the_line_above() {
+    let rows = vec![
+        Row::new(format!("{:<92}", "\u{276f} "), false),
+        Row::new("\u{2500}".repeat(92), false),
+    ];
+    let b = CopyBuffer::new(rows, (2, 92));
+    let text = b.text_range((0, 0), (1, 91));
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+/// A long single token is not decoration, so a line the width broke around it
+/// still rejoins.
+#[test]
+fn a_line_of_one_long_token_is_not_taken_for_a_rule() {
+    let rows = vec![
+        Row::new(format!("{:<92}", format!("  {}", "a".repeat(88))), false),
+        Row::new(format!("{:<92}", "  continues here"), false),
+    ];
+    let b = CopyBuffer::new(rows, (2, 92));
+    let text = b.text_range((0, 0), (1, 91));
+    assert_eq!(text.lines().count(), 1, "{text:?}");
+}
+
+/// The terminal's own wrap still concatenates exactly, because that break can
+/// fall inside a word. Only a break the program chose gets a space. A row the
+/// terminal wrapped is full, which is why it wrapped.
+#[test]
+fn a_terminal_wrap_still_joins_without_a_space() {
+    let head = format!(
+        "  a word that splits part way through manage{}",
+        "x".repeat(48)
+    );
+    assert_eq!(head.chars().count(), 92);
+    let rows = vec![
+        Row::new(head, true),
+        Row::new(format!("{:<92}", "ment and carries on"), false),
+    ];
+    let b = CopyBuffer::new(rows, (2, 92));
+    let text = b.text_range((0, 0), (1, 91));
+    assert!(text.contains("xment and"), "the word was split: {text:?}");
+    assert_eq!(text.lines().count(), 1);
 }
