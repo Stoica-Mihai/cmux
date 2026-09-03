@@ -524,6 +524,9 @@ async fn dispatch(
                     .send(Event::FrameDelta {
                         id: session_id,
                         bytes: payload,
+                        at_ms: sess
+                            .last_active_ms
+                            .load(std::sync::atomic::Ordering::SeqCst),
                     })
                     .await;
             }
@@ -591,6 +594,9 @@ async fn dispatch(
             // Byte fan-out
             let mut rx = sess.bytes_tx.subscribe();
             let tx = event_tx.clone();
+            // The pty reader stamps this before it broadcasts, so it is the
+            // moment this very chunk was read.
+            let last_active = sess.last_active_ms.clone();
             let h = tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
@@ -599,6 +605,7 @@ async fn dispatch(
                                 .send(Event::FrameDelta {
                                     id: session_id,
                                     bytes: chunk,
+                                    at_ms: last_active.load(std::sync::atomic::Ordering::SeqCst),
                                 })
                                 .await
                                 .is_err()

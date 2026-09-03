@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// at rather than the one it asked for; 5 reports whether the child is still
 /// alive, which nothing could see before. A stale client is rejected at the
 /// handshake rather than left to fail on a decode.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Environment variables exported by outer terminals that misadvertise the
 /// host capabilities to the child. cmux IS the terminal the child sees; strip
@@ -273,6 +273,11 @@ pub enum Event {
     FrameDelta {
         id: u64,
         bytes: Vec<u8>,
+        /// When the session last produced output, by the daemon's clock. An
+        /// attach replay carries the moment the bytes were produced rather
+        /// than the moment they were sent, so re-attaching does not read as
+        /// fresh activity.
+        at_ms: u64,
     },
     StatusUpdate {
         id: u64,

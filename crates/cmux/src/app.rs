@@ -487,6 +487,7 @@ impl App {
                 None,
                 info.id,
                 daemon.req_tx.clone(),
+                info.last_active_ms,
             );
             daemon.register_slot(info.id, slot);
             // Subscribe so FrameDelta starts flowing for this session. A
@@ -534,6 +535,7 @@ impl App {
             None,
             info.id,
             daemon.req_tx.clone(),
+            info.last_active_ms,
         );
         daemon.register_slot(info.id, slot);
         let wired = daemon

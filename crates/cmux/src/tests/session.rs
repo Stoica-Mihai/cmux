@@ -1,6 +1,12 @@
 use super::*;
 
 fn daemon_session(remote_id: u64) -> (Session, mpsc::Receiver<ProtoRequest>) {
+    adopted_session(remote_id, 0)
+}
+
+/// A daemon-backed session whose last activity the daemon reported as
+/// `last_active`.
+fn adopted_session(remote_id: u64, last_active: u64) -> (Session, mpsc::Receiver<ProtoRequest>) {
     let (tx, rx) = mpsc::channel();
     let (sess, _slot) = Session::new_daemon(
         1,
@@ -13,8 +19,30 @@ fn daemon_session(remote_id: u64) -> (Session, mpsc::Receiver<ProtoRequest>) {
         None,
         remote_id,
         tx,
+        last_active,
     );
     (sess, rx)
+}
+
+/// A session adopted on connect has been running without this client, so its
+/// age belongs to the daemon. Restarting it from the attach made a session
+/// idle for five minutes read as brand new, and flashed its running dot.
+#[test]
+fn an_adopted_session_keeps_the_age_the_daemon_reported() {
+    let five_minutes = 5 * 60 * 1000;
+    let (sess, _rx) = adopted_session(7, crate::util::now_ms() - five_minutes);
+    let age = sess.activity_age_ms();
+    assert!(
+        (five_minutes..five_minutes + 5_000).contains(&age),
+        "age is {age}ms, not the five minutes the daemon reported"
+    );
+}
+
+/// Nothing reported means now, which is what a freshly spawned session wants.
+#[test]
+fn an_unreported_age_starts_from_now() {
+    let (sess, _rx) = adopted_session(7, 0);
+    assert!(sess.activity_age_ms() < 5_000);
 }
 
 /// The confirm dialog promises the process will be killed. Dropping a

@@ -19,6 +19,7 @@ fn detaching_ends_the_session_on_the_daemon_too() {
         None,
         5,
         tx,
+        0,
     );
     let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
     app.sessions.push(sess);

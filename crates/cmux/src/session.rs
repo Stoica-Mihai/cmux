@@ -364,6 +364,10 @@ impl Session {
     /// a reader thread that feeds FrameDelta bytes from the daemon into the
     /// returned `parser`/`byte_ring` via the returned `DaemonSlot`, and for
     /// servicing `req_tx` to ship Requests to the daemon.
+    ///
+    /// `last_active` is when the daemon last saw output. A session adopted on
+    /// connect has been running without this client, so its age comes from the
+    /// daemon rather than from this moment.
     #[allow(clippy::too_many_arguments)]
     pub fn new_daemon(
         id: u64,
@@ -376,13 +380,18 @@ impl Session {
         pid: Option<u32>,
         remote_id: u64,
         req_tx: mpsc::Sender<ProtoRequest>,
+        last_active: u64,
     ) -> (Self, DaemonSlot) {
         let parser = Arc::new(Mutex::new(TerminalState::new(rows, cols)));
         let alive = Arc::new(AtomicBool::new(true));
         let dirty = Arc::new(AtomicBool::new(true));
         let byte_ring: Arc<Mutex<VecDeque<u8>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(RING_BYTES_CAP)));
-        let last_active_ms = Arc::new(AtomicU64::new(now_ms()));
+        let last_active_ms = Arc::new(AtomicU64::new(if last_active == 0 {
+            now_ms()
+        } else {
+            last_active
+        }));
         let pending_status: Arc<Mutex<Option<PendingStatus>>> = Arc::new(Mutex::new(None));
         let exit_status: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let slot = DaemonSlot {

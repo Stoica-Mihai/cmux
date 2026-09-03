@@ -66,6 +66,7 @@ fn event_framedelta() {
     round_trip(Event::FrameDelta {
         id: 1,
         bytes: vec![1, 2, 3, 4, 5],
+        at_ms: 1_700_000_000_000,
     });
 }
 

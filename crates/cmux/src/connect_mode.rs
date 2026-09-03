@@ -191,7 +191,7 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
         .spawn(move || {
             while let Ok(ev) = creader.recv() {
                 match ev {
-                    Event::FrameDelta { id, bytes } => {
+                    Event::FrameDelta { id, bytes, at_ms } => {
                         let slot_opt = slots_for_reader
                             .lock()
                             .ok()
@@ -207,7 +207,10 @@ pub fn connect(path: &Path, http: Option<&str>) -> Result<(Arc<DaemonHandle>, Ve
                                     r.drain(..over);
                                 }
                             }
-                            slot.last_active_ms.store(now_ms(), Ordering::SeqCst);
+                            // The daemon's timestamp, so an attach replay of
+                            // old output does not reset the session's age.
+                            let at = if at_ms == 0 { now_ms() } else { at_ms };
+                            slot.last_active_ms.fetch_max(at, Ordering::SeqCst);
                             slot.dirty.store(true, Ordering::Relaxed);
                         }
                     }
