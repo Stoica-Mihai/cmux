@@ -68,7 +68,7 @@ fn run_with_daemon(
     app.daemon = Some(handle.clone());
 
     // Adopt every existing daemon session into the sidebar.
-    let (main_rows, main_cols) = tile_size(&app);
+    let (main_rows, main_cols) = app.tile_size();
     let adopted = !infos.is_empty();
     for info in infos {
         let _ = app.adopt_daemon_session(info, &handle, main_rows, main_cols);
@@ -974,18 +974,8 @@ fn log_key(key: &KeyEvent, prefix_pending: bool) {
 /// Rows and columns a focused tile gets at the current terminal size. The
 /// draw pass reports the real inner size back, so this is what a session is
 /// told before its first frame.
-fn tile_size(app: &App) -> (u16, u16) {
-    let (term_rows, term_cols) = app.term_size;
-    let sidebar_w: u16 = if app.show_sidebar { ui::SIDEBAR_W } else { 0 };
-    let cols = term_cols
-        .saturating_sub(sidebar_w)
-        .saturating_sub(2)
-        .max(10);
-    (term_rows.saturating_sub(3).max(4), cols)
-}
-
 fn resize_all(app: &mut App) {
-    let (main_rows, main_cols) = tile_size(app);
+    let (main_rows, main_cols) = app.tile_size();
     if let Some(s) = app.sessions.get_mut(app.focus) {
         let _ = s.resize(main_rows, main_cols);
     }

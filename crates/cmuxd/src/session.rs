@@ -316,13 +316,18 @@ impl Session {
 
     /// Forget a client that has gone away, and grow back if it was the
     /// smallest one holding the grid down.
+    ///
+    /// With nobody left the pty keeps the size it is running at. Reverting to
+    /// the baseline made the program reflow for no viewer, and that repaint is
+    /// output, so a session's age restarted every time its last client quit.
+    /// A baseline set deliberately still applies through `set_baseline_size`.
     pub fn drop_client(&self, client: u64) {
         let removed = self
             .client_sizes
             .lock()
             .map(|mut m| m.remove(&client).is_some())
             .unwrap_or(false);
-        if removed {
+        if removed && self.attached_clients() > 0 {
             let _ = self.apply_effective_size();
         }
     }

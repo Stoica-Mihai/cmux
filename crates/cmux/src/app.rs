@@ -447,7 +447,7 @@ impl App {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| cwd.display().to_string())
         });
-        let (rows, cols) = self.tile_size_for_new();
+        let (rows, cols) = self.tile_size();
         let id = self.next_id;
         self.next_id += 1;
 
@@ -556,14 +556,27 @@ impl App {
         Ok(())
     }
 
-    fn tile_size_for_new(&self) -> (u16, u16) {
-        let n = (self.sessions.len() + 1) as u16;
-        let cols_grid = (n as f32).sqrt().ceil() as u16;
-        let rows_grid = n.div_ceil(cols_grid);
+    /// Size of the tile a session is drawn in. The dashboard draws only the
+    /// focused session, at the whole main area, so this is the one size any
+    /// session is ever rendered at. Sizing a new session for a grid of tiles
+    /// meant every session was born at a size nothing drew it at, and the
+    /// first focus resized it - which made the program repaint, and reset the
+    /// age the sidebar counts up.
+    pub fn tile_size(&self) -> (u16, u16) {
         let (term_rows, term_cols) = self.term_size;
-        let body_rows = term_rows.saturating_sub(2);
-        let rows = (body_rows / rows_grid.max(1)).saturating_sub(2).max(4);
-        let cols = (term_cols / cols_grid.max(1)).saturating_sub(2).max(10);
+        let sidebar_w: u16 = if self.show_sidebar {
+            crate::ui::SIDEBAR_W
+        } else {
+            0
+        };
+        // Rows: the titlebar, the footer, and the tile block's two borders.
+        // Columns: the sidebar, the block's two borders, and the column of
+        // padding the tile keeps on each side.
+        let rows = term_rows.saturating_sub(4).max(4);
+        let cols = term_cols
+            .saturating_sub(sidebar_w)
+            .saturating_sub(4)
+            .max(10);
         (rows, cols)
     }
 

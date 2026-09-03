@@ -295,3 +295,27 @@ fn the_dashboard_survives_a_terminal_too_small_for_its_layout() {
         assert_eq!(buf.area.width, w, "it drew outside a {w}x{h} frame");
     }
 }
+/// A new session is created at [`App::tile_size`], and the dashboard draws the
+/// focused session at the whole main area. The two must agree: while they did
+/// not, every session was born at a size nothing drew it at, so the first
+/// focus resized the pty, the program repainted, and the age restarted.
+#[test]
+fn a_session_is_born_at_the_size_the_dashboard_draws_it_at() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
+    app.sessions.push(session());
+    app.focus = 0;
+
+    let mut term = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    let mut sizes: crate::ui::TileSizes = Vec::new();
+    term.draw(|f| crate::ui::draw(f, &mut app, &mut sizes))
+        .expect("draw the dashboard");
+
+    assert_eq!(
+        sizes,
+        vec![(0, app.tile_size().0, app.tile_size().1)],
+        "the drawn tile and the size a new session is spawned at disagree"
+    );
+}

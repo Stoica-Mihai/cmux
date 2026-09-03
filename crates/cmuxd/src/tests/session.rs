@@ -212,3 +212,67 @@ fn a_claude_session_gets_a_probe() {
     assert!(sess.has_probe());
     assert!(sess.info().probe.dangerous());
 }
+
+/// The pty keeps its size when the last client goes away. Reverting to the
+/// spawn-time baseline made the program reflow for no viewer, and that repaint
+/// is output, so a session's age restarted every time its last client quit.
+#[test]
+fn the_last_client_leaving_does_not_resize_the_pty() {
+    let sess = Session::spawn(
+        11,
+        "sizer".into(),
+        PathBuf::from("/tmp"),
+        vec!["/bin/sleep".into(), "30".into()],
+        ProbeKind::None,
+        30,
+        100,
+    )
+    .expect("spawn /bin/sleep");
+
+    sess.set_client_size(1, 20, 60).expect("size for a client");
+    let info = sess.info();
+    assert_eq!(
+        (info.rows, info.cols),
+        (20, 60),
+        "the attached client governs the size"
+    );
+
+    sess.drop_client(1);
+    let info = sess.info();
+    assert_eq!(
+        (info.rows, info.cols),
+        (20, 60),
+        "the pty reverted to its baseline when nobody was left"
+    );
+    sess.kill();
+}
+
+/// While someone is still attached the minimum still governs, so the smallest
+/// client leaving grows the pty back.
+#[test]
+fn a_client_leaving_grows_back_for_the_ones_still_attached() {
+    let sess = Session::spawn(
+        12,
+        "sizer".into(),
+        PathBuf::from("/tmp"),
+        vec!["/bin/sleep".into(), "30".into()],
+        ProbeKind::None,
+        30,
+        100,
+    )
+    .expect("spawn /bin/sleep");
+
+    sess.set_client_size(1, 40, 120).expect("a big client");
+    sess.set_client_size(2, 20, 60).expect("a small client");
+    let info = sess.info();
+    assert_eq!((info.rows, info.cols), (20, 60), "the minimum governs");
+
+    sess.drop_client(2);
+    let info = sess.info();
+    assert_eq!(
+        (info.rows, info.cols),
+        (40, 120),
+        "the remaining client should have got its own size back"
+    );
+    sess.kill();
+}
