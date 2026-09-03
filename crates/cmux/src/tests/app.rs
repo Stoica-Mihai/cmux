@@ -117,6 +117,7 @@ fn daemon_session(id: u64, label: &str) -> Session {
         None,
         id,
         tx,
+        0,
     )
     .0
 }
@@ -196,24 +197,43 @@ fn a_new_tile_never_gets_a_degenerate_size() {
     // Small enough that the naive arithmetic would underflow to zero.
     let mut app = App::new(PathBuf::from("/tmp"), (4, 12));
     for n in 0..8 {
-        let (rows, cols) = app.tile_size_for_new();
+        let (rows, cols) = app.tile_size();
         assert!(rows >= 4, "tile {n} got {rows} rows");
         assert!(cols >= 10, "tile {n} got {cols} cols");
         app.sessions.push(daemon_session(n + 1, "s"));
     }
 }
 
+/// The dashboard draws only the focused session, at the whole main area, so
+/// every session is drawn at the same size however many there are. Sizing a
+/// new one for a grid of tiles meant it was born at a size nothing drew it at,
+/// and the first focus resized the pty - which made the program repaint and
+/// reset the age the sidebar counts up.
 #[test]
-fn tiles_shrink_as_the_grid_fills() {
+fn a_tile_is_the_same_size_however_many_sessions_there_are() {
     let mut app = App::new(PathBuf::from("/tmp"), (60, 200));
-    let one = app.tile_size_for_new();
+    let one = app.tile_size();
     for i in 1..=4 {
         app.sessions.push(daemon_session(i, "s"));
     }
-    let five = app.tile_size_for_new();
+    assert_eq!(
+        app.tile_size(),
+        one,
+        "the session count must not change the size a session is spawned at"
+    );
+}
+
+/// The sidebar is the only thing that takes width off the tile.
+#[test]
+fn hiding_the_sidebar_widens_a_new_tile() {
+    let mut app = App::new(PathBuf::from("/tmp"), (60, 200));
+    app.show_sidebar = true;
+    let with = app.tile_size();
+    app.show_sidebar = false;
+    let without = app.tile_size();
     assert!(
-        five.0 < one.0 && five.1 < one.1,
-        "a fifth tile should be smaller than the first: {one:?} then {five:?}"
+        without.1 > with.1 && without.0 == with.0,
+        "hiding the sidebar should only add width: {with:?} then {without:?}"
     );
 }
 

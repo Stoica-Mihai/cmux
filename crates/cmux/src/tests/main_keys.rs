@@ -31,6 +31,7 @@ fn session(id: u64, label: &str) -> Session {
         None,
         id,
         tx,
+        0,
     )
     .0
 }
@@ -208,6 +209,7 @@ fn the_prefix_can_send_a_literal_prefix_to_the_session() {
         None,
         1,
         tx,
+        0,
     );
     let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
     app.sessions.push(sess);
@@ -339,6 +341,7 @@ fn an_ordinary_key_reaches_the_focused_session() {
         None,
         1,
         tx,
+        0,
     );
     let mut app = App::new(PathBuf::from("/tmp"), (40, 120));
     app.sessions.push(sess);

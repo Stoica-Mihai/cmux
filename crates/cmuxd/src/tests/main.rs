@@ -155,12 +155,24 @@ async fn a_departing_client_stops_holding_every_session_small() {
     registry.insert(a.clone()).await;
     registry.insert(b.clone()).await;
 
+    // A second client stays attached, so the size the phone was holding down
+    // is observable after it leaves. With nobody left the pty keeps whatever
+    // size it is running at, which is what stops a detach from making the
+    // program repaint.
+    let desktop = registry.alloc_client_id();
     let phone = registry.alloc_client_id();
-    a.set_client_size(phone, 10, 40).expect("size a");
-    b.set_client_size(phone, 10, 40).expect("size b");
     for s in [&a, &b] {
+        s.set_client_size(desktop, 40, 120)
+            .expect("size for the desktop");
+        s.set_client_size(phone, 10, 40)
+            .expect("size for the phone");
         let info = s.info();
-        assert_eq!((info.rows, info.cols), (10, 40), "session {} ", info.id);
+        assert_eq!(
+            (info.rows, info.cols),
+            (10, 40),
+            "session {} should follow the smallest client",
+            info.id
+        );
     }
 
     registry.drop_client_everywhere(phone).await;
@@ -169,11 +181,11 @@ async fn a_departing_client_stops_holding_every_session_small() {
         let info = s.info();
         assert_eq!(
             (info.rows, info.cols),
-            (24, 80),
+            (40, 120),
             "session {} stayed small after the client left",
             info.id
         );
-        assert_eq!(s.attached_clients(), 0);
+        assert_eq!(s.attached_clients(), 1, "only the desktop should be left");
     }
     a.kill();
     b.kill();

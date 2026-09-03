@@ -121,6 +121,7 @@ pub(in crate::ui) mod harness {
                 None,
                 id,
                 tx,
+                0,
             );
             app.sessions.push(sess);
         }
